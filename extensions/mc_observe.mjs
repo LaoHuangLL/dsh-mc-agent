@@ -199,6 +199,7 @@ export async function apply (api) {
       image: { type: 'boolean', description: '是否画截图（默认 true；false = 只要结构化状态，不画图不落盘，省时间）' },
       percept: { type: 'boolean', description: '是否附三段式感知（看到/检测到/不确定，默认 true；false = 只要图和旧摘要，省 token）' },
       out: { type: 'string', description: `落盘路径（工作区相对；默认 .dsh-mc-agent/${OUT_DIR}/mc-observe-<时间>.png 不对外）` },
+      verbose: { type: 'boolean', description: 'true = 连背包/装备/耐久/渲染统计一起给（默认只给一眼能用的：位置/朝向/血量/头顶/脚下/周围/实体/图路径）' },
     },
     output: {
       schema: { type: 'object', properties: {}, additionalProperties: true },
@@ -401,7 +402,6 @@ export async function apply (api) {
             }
           })()
       const out = {
-        capturedAt: nowMs,
         position: s.position ?? { x: fx, y: fy, z: fz },
         facing: compassOf(yaw),
         yawDeg: Math.round((yaw * 180) / Math.PI * 10) / 10,
@@ -414,10 +414,7 @@ export async function apply (api) {
         submerged: Boolean(s.submerged),
         gamemode: s.gamemode ?? null,
         held: s.held ?? null,
-        equipment,
-        tools,
-        durability: durText,
-        inventory: inv,
+        ...(args.verbose === true ? { equipment, tools, durability: durText, inventory: inv } : {}),
         crosshair: !wantImage
           ? { block: null, note: '这次没截图（image:false）—— 准星对着什么看 structured 里的程序射线' }
           : cross === null
@@ -455,22 +452,26 @@ export async function apply (api) {
         crosshairEntity: frame?.stats.crosshairEntity ?? null,
         image: frame
           ? {
-              width, height, bytes: png.length,
-              renderMs,
-              hitPct: pct(frame.stats.hit),
-              skyPct: pct(frame.stats.sky),
-              unloadedPct: pct(frame.stats.unknown),
-              topBlocks: frame.stats.top.map((t) => `${t.name} ${pct(t.pixels)}%`),
-              /* 火把/花草/作物这类 boundingBox 为空的方块：视线直接穿过去，主射线打不到，
-               * 渲染器在像素循环后按碰撞盒单独补画（stats.softTop）。 */
-              softBlocks: (frame.stats.softTop ?? []).map((t) => `${t.name} ${pct(t.pixels)}%`),
-              centerSoft: frame.stats.centerSoft ?? null,
-              /* 官方贴图：texturedPct = 命中真贴图的像素占比（剩下的是调色板兜底）；
-               * atlas = 贴图库从哪来（null = 没找到客户端 jar ⇒ 纯调色板）。 */
-              texturedPct: pct(frame.stats.textured ?? 0),
-              atlas: atlas
-                ? { tiles: atlas.size, tag: atlas.tag, missing: (frame.stats.atlasMissing ?? []).slice(0, 5) }
-                : null,
+            /* 渲染统计（像素数/耗时/贴图来源）只在 verbose 时给 —— AI 判断用不到，
+             * 真正要看的是"画面里有什么"，那是下面这几个字段。 */
+            ...(args.verbose === true
+              ? {
+                  width, height, bytes: png.length,
+                  renderMs,
+                  texturedPct: pct(frame.stats.textured ?? 0),
+                  atlas: atlas
+                    ? { tiles: atlas.size, tag: atlas.tag, missing: (frame.stats.atlasMissing ?? []).slice(0, 5) }
+                    : null,
+                }
+              : {}),
+            hitPct: pct(frame.stats.hit),
+            skyPct: pct(frame.stats.sky),
+            unloadedPct: pct(frame.stats.unknown),
+            topBlocks: frame.stats.top.map((t) => `${t.name} ${pct(t.pixels)}%`),
+            /* 火把/花草/作物这类 boundingBox 为空的方块：视线直接穿过去，主射线打不到，
+             * 渲染器在像素循环后按碰撞盒单独补画（stats.softTop）。 */
+            softBlocks: (frame.stats.softTop ?? []).map((t) => `${t.name} ${pct(t.pixels)}%`),
+            centerSoft: frame.stats.centerSoft ?? null,
             }
           : null,
       }
@@ -674,7 +675,7 @@ export async function apply (api) {
           lines.push(`👁 **这次没截图**（\`image:false\`）—— 只有下面的游戏数据（要看画面：再调一次 mc_observe，别带 image:false）`)
         }
         lines.push(
-          `🎯 **程序检测到**（游戏数据 · 采样 ${stamp}）：我在 (${out.position.x}, ${out.position.y}, ${out.position.z}) · 朝 ${out.facing} yaw=${out.yawDeg}° pitch=${out.pitchDeg}°`
+          `🎯 **程序检测到**（游戏数据 · 采样 ${stamp}）：我在 (${out.position.x}, ${out.position.y}, ${out.position.z})（**脚底那格**：脚在 y=${out.position.y}，站在 y=${out.position.y - 1} 的方块上） · 朝 ${out.facing} yaw=${out.yawDeg}° pitch=${out.pitchDeg}°`
             + (out.dimension ? ` · ${out.dimension}` : '') + (out.timeOfDay != null ? ` · ${out.timeOfDay}` : '')
             + (out.crosshairEntity ? ` · 准星正对着 ${out.crosshairEntity.name}（${out.crosshairEntity.distance} 格）` : ''),
           `   · 程序射线：${rayText}`,

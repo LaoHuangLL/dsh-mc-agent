@@ -246,6 +246,40 @@ export async function swimUp (self, { hold = 3_000 } = {}, ctx = {}) {
   if (want <= 0) {
     return { inWater: true, airBefore: air0, air: air0, rose: 0, heldMs: 0, note: 'hold 是 0（没让我按）—— 要上浮就再叫一次 mc_move{"mode":"swim"}' }
   }
+  /* 🔴 2026-10-25 实机（用户：「我看它基本没浮起来，自救没用了？」）：
+   *   以前只看"有没有上升"，**不先看头顶** —— 头顶被封死时照样按满 hold（1.2~10 秒）的 jump，
+   *   `rose` 一直是 0，最后只回一句"没上去"，不说为什么。AI 只能自己猜"头顶哪格挡着"。
+   *   现在：先读脚上方两格，第一格实心就立刻返回（省掉那一整段白按），并说清该挖哪一格。
+   *   判据用 `isWaterLike`（含 seagrass/kelp/bubble_column）+ `isPassable`，别把水草当成天花板。 */
+  const ceilingOf = () => {
+    try {
+      const p = b.entity?.position
+      if (!p) return null
+      const bx = Math.floor(p.x)
+      const by = Math.floor(p.y)
+      const bz = Math.floor(p.z)
+      for (let dy = 1; dy <= 2; dy++) {
+        const blk = b.blockAt(new Vec3(bx, by + dy, bz))
+        if (!blk) continue
+        const nm = String(blk.name ?? '')
+        if (!nm || isAir(nm) || isWaterLike(nm) || isPassable(nm)) continue
+        return { name: nm, dy, x: bx, y: by + dy, z: bz }
+      }
+      return null
+    } catch { return null }
+  }
+  const ceil = ceilingOf()
+  if (ceil) {
+    return {
+      inWater: true, airBefore: air0, air: air0, rose: 0, heldMs: 0, reason: 'ceiling',
+      ceiling: { name: ceil.name, x: ceil.x, y: ceil.y, z: ceil.z },
+      hint: `头顶${ceil.dy === 1 ? '' : '第二格'}就是 **${ceil.name}**（${ceil.x}, ${ceil.y}, ${ceil.z}）`
+        + ' —— **上浮没路**，再按 jump 也升不上去，别重复叫 swim。\n'
+        + `挖开它：\`mc_act {"mode":"break","x":${ceil.x},"y":${ceil.y},"z":${ceil.z}}\``
+        + '（挖开若上面还是水，水会灌下来）；\n'
+        + '或者往**侧面实心方块**里挖一格做空气袋（水灌不进去），钻进去换气再上来。',
+    }
+  }
   const gen = bumpGen()
   const t0 = Date.now()
   let held = 0
@@ -749,7 +783,8 @@ async function walkToUnguarded (self, target, { arrive = 1.6, budget = self.cfg.
     const blocks = Math.max(0, Math.round(Number(info?.pathLen) || Number(info?.remaining) || 0))
     info = {
       ...info,
-      hint: `${info.hint ? info.hint + ' ' : ''}这条路还剩约 ${blocks} 格，按一次 10 秒（约 43 格）算**大约还要 ${estCalls} 次调用** —— 同参数接着叫就行，别换目标点。`,
+      /* 2026-10-24：只补进度事实，不再塞“别换目标点”——那句会和真正该做的建议（搭桥/挖开/换目标）打架。 */
+      hint: `${info.hint ? info.hint + ' ' : ''}（这条路还剩约 ${blocks} 格，按一次 10 秒（约 43 格）算**大约还要 ${estCalls} 次调用**。）`,
     }
   }
   /* ================= 2026-10-24 用户点单：① 失败去重 + ③ 中途返回极简 =================
@@ -770,6 +805,18 @@ async function walkToUnguarded (self, target, { arrive = 1.6, budget = self.cfg.
       'held', 'heldRestored', 'heldRestoreWhy', 'via', 'preempted', 'repeat', 'stuck']
     const r = {}
     for (const k of keep) if (o[k] !== undefined) r[k] = o[k]
+    return r
+  }
+  /* 🔴 2026-10-24 用户：「像move一样简化输出，只保留重要信息」——
+   *    删掉纯诊断字段（route / pathResets / pathResetReasons / pathLenPlanned /
+   *    moved3d / delta / xz）—— 这些 `mc_diag` 都能查，平时只会占地方。
+   *    到达时 `above` / `blockedAhead` / `terrain` 也删（人都到了，看头顶干什么）。
+   *    `heldRestored` 只在"真的换回来了"时才值得说。 */
+  const pruneMove = (o) => {
+    const r = { ...o }
+    for (const k of ['route', 'pathResets', 'pathResetReasons', 'pathLenPlanned', 'moved3d', 'delta', 'xz']) delete r[k]
+    if (r.arrived) { delete r.above; delete r.blockedAhead; delete r.terrain }
+    if (r.heldRestored === r.held) { delete r.heldRestored; delete r.heldRestoreWhy }
     return r
   }
   const whyShort = (o) => (o?.tooHard
@@ -818,8 +865,8 @@ async function walkToUnguarded (self, target, { arrive = 1.6, budget = self.cfg.
     }
   }
   const route = routeTrack(self, target, outInfo)
-  if (!route?.stalled) return { ...outInfo, route }
-  return { ...outInfo, route, hint: `${outInfo.hint ? outInfo.hint + '\n' : ''}${route.hint}` }
+  if (route?.stalled) outInfo = { ...outInfo, hint: (outInfo.hint ? outInfo.hint + "\n" : "") + route.hint }
+  return pruneMove(outInfo)
 }
 
 async function walkToOnce (self, target, { arrive = 1.6, budget = self.cfg.moveBudgetMs, noTower = true, towerFallback = true, intent = 'near', waterRecover, noDig = false, xz = false } = {}, ctx = {}) {
@@ -2157,6 +2204,12 @@ export async function detourStep (b, target, { goals = null, ctx = {}, budgetMs 
 export const STEP_UP_MS = 320
 /** 松手后等落地/站稳的时间。 */
 export const STEP_UP_SETTLE_MS = 240
+/* 🔴 2026-10-25 实机（上刚挖好的阶梯卡住，用户确认「头上方是空的」）：跳了却没上去（`up=0` → `no-lift`）。
+ *   两条叠加：① `lookAt` 之后只等 60ms，转身包还没生效，1 格宽竖井里朝向差 90° 就撞侧墙；
+ *   ② `forward` 与 `jump` 同时按下，起跳上升阶段身体正面撞台阶侧面，窄井没有侧向余量可滑 ⇒ 弹回原地。
+ *   现在：看向后等 `STEP_UP_TURN_MS` 让朝向生效，先单独按 `jump` 起跳 `STEP_UP_JUMP_MS`，再叠 `forward`。 */
+export const STEP_UP_TURN_MS = 150
+export const STEP_UP_JUMP_MS = 80
 /** 一次 `mc_move` 里最多试几次台阶动作（跳上去 / 定向清天花板）。 */
 /**
  * 前方通道里是不是**实体**挡着（怪 / 动物 / 别人）—— 与"方块挡路"分开报。
@@ -2411,7 +2464,12 @@ export async function stepUp (b, target, { allowDig = true, ctx = null, cells = 
   try { ctx?.stopPathing?.(b) } catch {}
   await sleep(60)
   try { await b.lookAt(new Vec3(geo.x + 0.5, y0 + 0.2, geo.z + 0.5), true) } catch {}
-  try { b.setControlState('forward', true); b.setControlState('jump', true) } catch {}
+  /* 等朝向真正生效再动（原来只等 60ms，转身包还没到服务端就按 forward ⇒ 朝旧方向撞墙） */
+  await sleep(STEP_UP_TURN_MS)
+  /* 先起跳、再前进：同时按会让身体在上升阶段正面撞台阶侧面，窄井里直接被弹回 */
+  try { b.setControlState('jump', true) } catch {}
+  await sleep(STEP_UP_JUMP_MS)
+  try { b.setControlState('forward', true) } catch {}
   await sleep(geo.partial ? Math.min(ms, 180) : ms)
   try { b.setControlState('jump', false) } catch {}
   await sleep(STEP_UP_SETTLE_MS)
@@ -2622,8 +2680,9 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
   /* 🔴 2026-10-18 审计（用户转来的报告 Bug 2）：`moved` 只有水平位移（`hypot(dx, dz)`）。
    *    掉下去 21 格时它报 4.24（靠 `fell` 补），上一格台阶时它报 0（`fell` 又不触发）——
    *    模型没法从 `moved` 本身看出"我到底是平移了、爬上去了，还是掉下去了"。
-   *    现在一次给全：`moved`（兼容，仍是水平）+ `movedHorizontal` / `movedVertical`（dy，正=上升）/
-   *    `moved3d`（三维直线距离）/ `delta: {x,y,z}`。判"有没有进展"要看水平，判"上没上去"看垂直。 */
+   *    现在一次给全：`moved`（水平）/ `movedVertical`（dy，正=上升）/ `moved3d`（三维直线距离）/
+   *    `delta: {x,y,z}`。判"有没有进展"要看水平，判"上没上去"看垂直。
+   *    2026-10-24 用户「为什么move现在有这么多输出」：删掉与 `moved` 完全重复的 `movedHorizontal`。 */
   const deltaOf = (p) => {
     const dx = Number((Number(p?.x ?? start.x) - start.x).toFixed(2))
     const dy = Number((Number(p?.y ?? start.y) - start.y).toFixed(2))
@@ -2631,7 +2690,6 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
     const horizontal = Number(Math.hypot(dx, dz).toFixed(2))
     return {
       moved: horizontal,
-      movedHorizontal: horizontal,
       movedVertical: dy,
       moved3d: Number(Math.hypot(dx, dy, dz).toFixed(2)),
       delta: { x: dx, y: dy, z: dz },
@@ -3519,6 +3577,56 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
         }
       }
     }
+    /* 🔴 2026-10-24 用户：「为什么move现在有这么多输出」——
+     *    原来每条建议都是独立的 if 拼上去，一次能同时出 5 段，而且互相矛盾
+     *    （"直接 bridge 搭过去" 与 "换个能走到的目标点" 同时出现，还说"不是走不通"）。
+     *    现在**只挑一条**：按"最该先做什么"排序，命中即停。 */
+    const adviceFor = () => {
+      if (preempted) {
+        return fellOf(end) != null
+          ? '—— 这次走路被**另一次移动**打断了（旁边有怪时是自保反射先跑），但更值得注意的是：**你刚掉下来了**。先站稳、看清脚下，再决定往哪走，别对着同一个高度反复爬。'
+          : '—— 这次走路被**另一次移动**打断了（旁边有怪时是自保反射先跑，也可能是又发了一次 mc_move）：等它结束，再叫一次 mc_move 往同一个目标走就行，**不是走不通**。'
+      }
+      if (blockedAhead) {
+        const where = `${blockedAhead.cell === 'feet' ? '齐脚那格' : '头顶那格'} ${blockedAhead.x},${blockedAhead.y},${blockedAhead.z}`
+        if (isTreeBlock(blockedAhead.name)) {
+          return `—— 眼前挡路的是 **${blockedAhead.name}**（${where}）：是**树** —— **别挖树**（挖开树冠只会让我自己爬上去）：绕开走，或者换个目标点。`
+        }
+        if (DOOR_RE.test(blockedAhead.name)) {
+          return `—— 眼前挡路的是 **${blockedAhead.name}**（${where}）：是**门**：\`mc_act {mode:"use", x:${blockedAhead.x}, y:${blockedAhead.y}, z:${blockedAhead.z}}\` 按开它（或走近再叫一次 mc_move，会自动开门），**别挖墙也别挖门**。`
+        }
+        if (blockedNeed) {
+          return `—— 眼前挡路的是 **${blockedAhead.name}**（${where}）：这块**你现在挖不动**（要${blockedNeed}，手上这套挖下去要几十秒，必超时）—— **别硬挖、别重复发同一个目标**：先换个方向绕（或 \`mc_move {noDig:false}\` 另找一条能挖开的路），实在绕不过去就先弄一把${blockedNeed}。`
+        }
+        return `—— 眼前挡路的是 **${blockedAhead.name}**（${where}）：挖得动的话直接 \`mc_act {mode:"break", x:${blockedAhead.x}, y:${blockedAhead.y}, z:${blockedAhead.z}}\` 挖掉它，再叫 mc_move。`
+      }
+      if (!preempted && terrain.kind === 'gap') {
+        return `—— 你脚边是**${terrain.text}**（${terrain.note}）：别绕着试了，直接 \`mc_act {mode:"bridge"}\` 朝目标搭过去。`
+      }
+      if (!preempted && terrain.kind === 'hazard') {
+        return `—— 你脚边是**${terrain.text}**（${terrain.note}）：别从这边走，换个方向绕。`
+      }
+      if (exhausted) {
+        const narrow = (remaining <= 2.5 && (carved || carveTries))
+          ? `—— 你离目标只剩 ${remaining.toFixed(1)} 格，多半是**窄道/台阶**：先 \`mc_act {mode:"break"}\` 挖掉**脚前那一格**，再挖它**头顶那一格**，然后叫 \`mc_move\` 走一步。`
+          : ''
+        const thrash = pathThrash
+          ? `—— 这一轮**路径被重算了 ${pathResetsTotal} 次**（${Object.entries(resetReasons).map(([k, v]) => `${REASON_TEXT[k] ?? k}×${v}`).join('、')}）：说明**路一直在被世界变化打断**（别人放的方块 / 走过来的实体 / 岩浆流 / 方块更新），不是"找不到路"——光重算没用，所以停了。**换个走法**：`
+          : ''
+        return narrow + thrash
+          + `—— **别原地重试了**（已经替你换过 ${repathCount} 次策略都没用）：把长路**拆成几段**，先走到中间一个能站住的点、再走下一段；或者用 \`mc_scan\` 看挡在中间的是什么（墙 / 水 / 栅栏 / 半砖）。`
+      }
+      if (noProgress && !timeUp) {
+        return '—— **是真没走通**（一格没挪、也没靠近）：先 `mc_act {mode:"jump"}` 蹦一下（可能是卡在方块里 / 台阶上），再 `mc_scan` 看脚下和目标那格是什么；换个近一点的目标点通常更快。'
+      }
+      if (timeUp) {
+        return `—— 这一轮的走路时间用完了（单次调用最多 ${budgetSecText()}），**不是走不通**：直接再叫一次 mc_move 往同一个目标走，会接着走。`
+      }
+      if (pathResetsTotal > 0) {
+        return `—— 途中路径被重算了 ${pathResetsTotal} 次（${Object.entries(resetReasons).map(([k, v]) => `${REASON_TEXT[k] ?? k}×${v}`).join('、')}）：**不是走不通** —— chunk-loaded 那种是正常重算，stuck 是挪不动被 vendor 判的；直接再叫一次 mc_move 往同一目标走就行。`
+      }
+      return '—— 换个能走到的目标点，或先解除挡住它的方块。'
+    }
     return {
       arrived: false,
       position: at(end),
@@ -3532,63 +3640,7 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
       ...(blockedAhead ? { blockedAhead } : {}),
       /* 2026-10-18 审计 P1-1：走不到时把"头顶/四面/能垫的方块"一次给全 */
       ...((exhausted || e?.name === 'NoPath') && !preempted ? (() => { const sh = shaftInfoOf(b, target); return sh ? { shaft: sh } : {} })() : {}),
-      hint: `${fellNote(end)}${nm}（从 ${startRemaining.toFixed(1)} 格变成 ${remaining.toFixed(1)} 格，挪了 ${moved} 格${vertNote(end)}）`
-         // 地形那一句（导航 P2）：只在**真有用**的时候说 —— 沟要说"用 bridge"，
-         // 危险地形要说"别走这边"，平地/未知不说（说了纯占地方）
-         // 眼前那格挡路的方块（P1：AI 自己决定挖/绕/搭桥，走路层只把事实摆出来）
-         + (blockedAhead && !preempted
-           ? `—— 眼前挡路的是 **${blockedAhead.name}**（${blockedAhead.cell === 'feet' ? '齐脚那格' : '头顶那格'} `
-             + `${blockedAhead.x},${blockedAhead.y},${blockedAhead.z}）：挖得动的话直接 `
-             + (isTreeBlock(blockedAhead.name)
-               ? `是**树**（${blockedAhead.name}）—— **别挖树**（挖开树冠只会让我自己爬上去）：绕开走，或者换个目标点。`
-               : DOOR_RE.test(blockedAhead.name)
-               ? `是**门**：\`mc_act {mode:"use", x:${blockedAhead.x}, y:${blockedAhead.y}, z:${blockedAhead.z}}\` 按开它（或走近再叫一次 mc_move，会自动开门），**别挖墙也别挖门**。`
-               : blockedNeed
-                 ? `这块**你现在挖不动**（要${blockedNeed}，手上这套挖下去要几十秒，必超时）—— **别硬挖、别重复发同一个目标**：先换个方向绕（或 \`mc_move {noDig:false}\` 另找一条能挖开的路），实在绕不过去就先弄一把${blockedNeed}。`
-                 : `\`mc_act {mode:"break", x:${blockedAhead.x}, y:${blockedAhead.y}, z:${blockedAhead.z}}\` 挖掉它，再叫 mc_move。`)
-           : '')
-         + (!preempted && terrain.kind === 'gap'
-           ? `—— 你脚边是**${terrain.text}**（${terrain.note}）：别绕着试了，直接 \`mc_act {mode:"bridge"}\` 朝目标搭过去。`
-           : !preempted && terrain.kind === 'hazard'
-             ? `—— 你脚边是**${terrain.text}**（${terrain.note}）：别从这边走，换个方向绕。`
-             : '')
-         + (!preempted && !exhausted && pathResetsTotal > 0
-           ? `—— 途中路径被重算了 ${pathResetsTotal} 次`
-             + `（${Object.entries(resetReasons).map(([k, v]) => `${REASON_TEXT[k] ?? k}×${v}`).join('、')}）：`
-             + '**不是走不通** —— chunk-loaded 那种是正常重算，stuck 是挪不动被 vendor 判的；直接再叫一次 mc_move 往同一目标走就行。'
-           : '')
-         + (preempted
-           ? (fellOf(end) != null
-            ? '—— 这次走路被**另一次移动**打断了（旁边有怪时是自保反射先跑），但更值得注意的是：**你刚掉下来了**。先站稳、看清脚下，再决定往哪走，别对着同一个高度反复爬。'
-            : '—— 这次走路被**另一次移动**打断了（旁边有怪时是自保反射先跑，也可能是又发了一次 mc_move）：等它结束，再叫一次 mc_move 往同一个目标走就行，**不是走不通**。')
-           : exhausted
-             ? (pathThrash
-               ? `—— 这一轮**路径被重算了 ${pathResetsTotal} 次**`
-                 + `（${Object.entries(resetReasons).map(([k, v]) => `${REASON_TEXT[k] ?? k}×${v}`).join('、')}）：`
-                 + '说明**路一直在被世界变化打断**（别人放的方块 / 走过来的实体 / 岩浆流 / 方块更新），'
-                 + '不是"找不到路"——光重算没用，所以停了。**换个走法**：'
-               : '')
-               /* 2026-10-18 实机：1×2 窄道里的 1 格台阶，人贴在目标 0.8 格处一步不动。
-                * 自动补救（carveStepAhead）已经试过两次；还不行就把"手工挖台阶"的办法交给模型。 */
-               + (!preempted && remaining <= 2.5 && (carved || carveTries)
-                 ? `—— 你离目标只剩 ${remaining.toFixed(1)} 格，多半是**窄道/台阶**：脚下或头顶有一格挡着。`
-                   + '照实机的办法来：先 `mc_act {mode:"break",x:…,y:…,z:…}` 挖掉**脚前那一格**，再用同样方式挖掉它**头顶那一格**，然后叫 `mc_move` 走一步。'
-                 : '')
-               + `—— **别原地重试了**（已经替你换过 ${repathCount} 次策略都没用）：把长路**拆成几段**，`
-               + '先走到中间一个能站住的点、再走下一段；或者用 `mc_scan` 看挡在中间的是什么（墙 / 水 / 栅栏 / 半砖）。'
-               + '　要是"脚下明明没东西却还是走不动"，可能是我这边的世界和服务端对不上（客户端预测的方块缓存）——'
-               + '走远 32 格再回来让区块重发。'
-               + DESYNC_HINT
-             : noProgress && !timeUp
-             ? '—— **是真没走通**（一格没挪、也没靠近）：先 `mc_act {mode:"jump"}` 蹦一下（可能是卡在方块里 / 台阶上），再 `mc_scan` 看脚下和目标那格是什么；换个近一点的目标点通常更快。'
-                  + '　要是"脚下明明没东西却还是走不动"，可能是我这边的世界和服务端对不上（客户端预测的方块缓存）——'
-                  + '走远 32 格再回来让区块重发。'
-                  + DESYNC_HINT
-             : timeUp
-               ? `—— 这一轮的走路时间用完了（单次调用最多 ${budgetSecText()}），**不是走不通**：直接再叫一次 mc_move 往同一个目标走，会接着走。`
-               : noProgress
-                 ? '—— 这一轮**一格没挪**（时间到了，但也没靠近）：再叫一次 mc_move 试试；两次都一样就换个目标点。'
-                 : '—— 换个能走到的目标点，或先解除挡住它的方块。'),
+      hint: `${fellNote(end)}${nm}（从 ${startRemaining.toFixed(1)} 格变成 ${remaining.toFixed(1)} 格，挪了 ${moved} 格${vertNote(end)}）${adviceFor()}`,
     }
   } finally {
     // P0-1：采样器的定时器必须收掉 —— 留着会把进程钉住（也会在返回之后误判"卡住"）。

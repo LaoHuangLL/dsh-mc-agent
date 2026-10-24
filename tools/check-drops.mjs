@@ -16,6 +16,7 @@
  *
  * 用法：node tools/check-drops.mjs（**必须从包目录跑**）
  */
+import { readFileSync } from 'node:fs'
 import { Vec3 } from 'vec3'
 import { dropListOf, dropsNear } from '../src/world-observer.mjs'
 
@@ -80,6 +81,14 @@ console.log('\n── 畸形输入 ──')
     try { if (dropListOf(w, { radius: 8 }).length !== 0) bad++ } catch { bad++ }
   }
   ok(bad === 0, '畸形 bot ⇒ 空数组，不抛', 'bad=' + bad)
+}
+
+console.log('\n── 等吸附的范围（2026-10-25 用户要求收窄到 2 格）──')
+{
+  const src = readFileSync(new URL('../src/pickup.mjs', import.meta.url), 'utf8')
+  ok(/radius = 2, at = null/.test(src), 'waitForPickup 默认只看挖掘点 2 格内')
+  const digSrc = readFileSync(new URL('../src/mining.mjs', import.meta.url), 'utf8')
+  ok(/grabDrops\(b, \{ radius: 2\.5 \}\)/.test(digSrc), '挖完只捡脚边 2.5 格内的，远的只报不给捡')
 }
 
 console.log(`\ncheck-drops：pass=${pass} fail=${fail}`)

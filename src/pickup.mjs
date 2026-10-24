@@ -71,12 +71,14 @@ export async function grabDrops (self, b, { radius = 8, budgetMs = 3_000 } = {},
  *
  * @returns {Promise<number>} 这段时间里**自己飞进背包**的个数（0 = 没吸到，该走过去拿了）
  */
-export async function waitForPickup (self, b, { graceMs = PICKUP_GRACE_MS, radius = 3, at = null } = {}) {
+export async function waitForPickup (self, b, { graceMs = PICKUP_GRACE_MS, radius = 2, at = null } = {}) {
   const me = b?.entity?.position
   if (!me) return 0
   /* 2026-10-24 用户：「改成掉在**挖掘点 3 格以外**的」—— 判定以**挖掘点**为准，不是以人为准。
    *   挖下来的东西就掉在那一格附近；人在 3~4 格外挖远处方块时，以人为中心量会把它们判成"远的"，
-   *   于是每挖一格都跑一趟。现在只看"掉落物离挖掘点多远"：3 格内的先等吸附。 */
+   *   于是每挖一格都跑一趟。现在只看"掉落物离挖掘点多远"：范围内的先等吸附。
+   * 🔴 2026-10-25 用户：「pickup的范围缩小到2格」—— 3 ⇒ 2（吸附实际只吃到 1 格内，
+   *   给到 3 格是白等；2 格内才值得等，再远就直接走过去捡）。 */
   const c = at ?? me
   const near = dropsNear(b, 12).filter(({ e }) => {
     const q = e?.position

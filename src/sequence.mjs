@@ -154,8 +154,14 @@ export async function runSequence (self, steps, { stopOnError = true, budgetMs =
        *    `reason` / `error` 里了（够不着 / 挖不动 / 被复原 / 缺料 / 那里本来就是空气）。
        *    把真实原因原样带出来，模型才可能一次就改对。 */
       const why = String(r?.note ?? r?.reason ?? r?.error ?? '').trim()
+      /* 🔴 2026-10-24 输出瘦身（用户："只要 ai 读就行"）：成功的步骤不再把整个返回对象展开
+       *    （move 的 around/above/pathLen、break 的 held… 全塞进来，一串 8 步能堆出几千字），
+       *    只留"这步做了、走到没走到、还剩多少"。**失败**的步骤仍然原样带上，那是排查依据。 */
       results.push({
-        i, op: step.op, ok, ...r,
+        i, op: step.op, ok,
+        ...(ok
+          ? (step.op === 'move' ? { arrived: r?.arrived ?? null, remaining: r?.remaining ?? null } : {})
+          : r),
         ...(ok ? {} : {
           note: step.op === 'move'
             ? '这一步**没走到**（看 arrived / remaining）—— 再叫一次 mc_sequence，从这一步往后发就行'

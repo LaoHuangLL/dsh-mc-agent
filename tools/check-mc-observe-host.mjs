@@ -298,7 +298,7 @@ console.log('— ④ execute 输出（含真实渲染 + 附件 + 落盘）—')
   const spec = registered.get('mc_observe')
   sessions.set('C', { bot: mkBot(true) })
   const exec = { agent: { id: 'C', session: { header: { cwd: wsRoot } } } }
-  const out = await spec.execute({}, exec)
+  const out = await spec.execute({ verbose: true }, exec)
   // ── 三段式感知（2026-10-08 用户要求："看到什么 / 程序检测到什么 / 哪些不确定"分开） ──
   // 这个假 bot 的 `entities` 是**对象映射**（渲染要用）、`world` 没有 `raycast`
   // ⇒ 程序侧两条探针都会抛，感知块必须靠 try/catch 兜住并如实说"没跑出来"。
@@ -413,14 +413,14 @@ console.log('— ④ execute 输出（含真实渲染 + 附件 + 落盘）—')
   ok(outPlainNoEnt.text.includes('视野里没有实体'), 'percept:false + entities:false 时 👥 说没有实体')
 
   // 自定义参数 + 自定义输出路径（发布区）
-  const out2 = await spec.execute({ width: 200, height: 100, fov: 40, distance: 20, crosshair: false, out: '.dsh-mc-agent/.express/pic/v.png' }, exec)
+  const out2 = await spec.execute({ width: 200, height: 100, fov: 40, distance: 20, crosshair: false, out: '.dsh-mc-agent/.express/pic/v.png', verbose: true }, exec)
   ok(out2.image.width === 200 && out2.image.height === 100, '自定义尺寸生效', `${out2.image.width}x${out2.image.height}`)
   ok(out2.image.file === '.dsh-mc-agent/.express/pic/v.png', '自定义输出路径生效', String(out2.image.file))
   ok(existsSync(join(wsRoot, '.dsh-mc-agent/.express/pic/v.png')), '发布区文件写出来了')
   ok(out2.image.hint && out2.image.hint.includes('mc_kit_express'), '给发布区时提示用 mc_kit_express')
 
   // 越界参数要被夹住
-  const out3 = await spec.execute({ width: 99999, height: -5, fov: 999, distance: 99999 }, exec)
+  const out3 = await spec.execute({ width: 99999, height: -5, fov: 999, distance: 99999, verbose: true }, exec)
   ok(out3.image.width === 480 && out3.image.height === 18, '尺寸被夹到 [32,480] / [18,480]', `${out3.image.width}x${out3.image.height}`)
   ok(out3.image.width * out3.image.height < 20000, '夹完不会爆炸')
 

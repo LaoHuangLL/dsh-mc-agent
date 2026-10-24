@@ -333,6 +333,127 @@ export async function breakBlock (self, { x, y, z, allowDangerous = false } = {}
  * 判据：模块不 import `core.mjs`、不 import 游戏库（只认 `b.blockAt` / `b.dig` / `b.findBlocks` / `b.game`）。
  * ──────────────────────────────────────────────────────────────────────────── */
 
+/* ── 挖阶梯（`mc_dig {mode:"stair"}`） ────────────────────────────────────────
+ * 为什么不靠寻路器：A* 里「挖脚下直下」一层只要 `1 + digCost×digTime ≈ 9.8`，
+ * 而斜着下要挖 3 格（≈ 3 倍），所以它永远选竖井。竖井挖完还基本用不了 ——
+ * `getLandingBlock` 要求落差 ≤ maxDropDown(3)，深井中间没有落点，第二次就下不去。
+ * 阶梯（每下一格横移一格）挖一次永久能上下，还不会摔伤。
+ *
+ * 几何（关键，少挖一格就卡住）：站在 y 层走过去的那一刻，身体占 fx 的 y 和 y+1，
+ * 而目标站位是 y-1 ⇒ **前方必须挖空 3 格**（y-1 / y / y+1）。
+ * 只挖 2 格（y-1、y）会让头卡在 y+1 上 —— 这正好是"最容易卡死的形状"。
+ */
+export const STAIR_MAX_STEPS = 64
+export const STAIR_STEP_MS = 3_000
+
+/** 朝哪挖：给了目标 x/z 用主轴；给了 dir（"x+"/"x-"/"z+"/"z-"）直接用；都没给按当前朝向 */
+export function stairDirOf (b, { pos = null, dir = null } = {}) {
+  const p = b?.entity?.position
+  if (!p) return null
+  if (pos && (Number.isFinite(pos.x) || Number.isFinite(pos.z))) {
+    const dx = (Number.isFinite(pos.x) ? pos.x : p.x) - p.x
+    const dz = (Number.isFinite(pos.z) ? pos.z : p.z) - p.z
+    if (Math.abs(dx) < 0.5 && Math.abs(dz) < 0.5) return null
+    if (Math.abs(dx) >= Math.abs(dz)) return { x: dx > 0 ? 1 : -1, z: 0, name: dx > 0 ? 'x+' : 'x-' }
+    return { x: 0, z: dz > 0 ? 1 : -1, name: dz > 0 ? 'z+' : 'z-' }
+  }
+  const m = /^([xz])([+-])$/.exec(String(dir ?? ''))
+  if (m) {
+    return m[1] === 'x'
+      ? { x: m[2] === '+' ? 1 : -1, z: 0, name: String(dir) }
+      : { x: 0, z: m[2] === '+' ? 1 : -1, name: String(dir) }
+  }
+  const yaw = Number(b?.entity?.yaw) || 0
+  const vx = -Math.sin(yaw); const vz = -Math.cos(yaw)
+  if (Math.abs(vx) >= Math.abs(vz)) return { x: vx >= 0 ? 1 : -1, z: 0, name: 'x' + (vx >= 0 ? '+' : '-') }
+  return { x: 0, z: vz >= 0 ? 1 : -1, name: 'z' + (vz >= 0 ? '+' : '-') }
+}
+
+export async function digStair (self, {
+  pos = null, dir = null, maxSteps = STAIR_MAX_STEPS, budgetMs = 10_000,
+} = {}, ctx = {}) {
+  const b = self.requireBot()
+  const start = b.entity.position.floored()
+  if (!pos || !Number.isFinite(pos.y)) {
+    throw new Error('挖阶梯要知道挖到哪一层：给 y（目标高度，整数格）。x/z 可选，用来说朝哪个方向挖。')
+  }
+  const targetY = Math.floor(pos.y)
+  /* 往上 / 往下都能挖：目标 y 比现在高就是上升阶梯 */
+  const up = start.y < targetY
+  const d = stairDirOf(b, { pos, dir })
+  if (!d) throw new Error('算不出往哪挖：给 x/z（朝那个点挖）或 dir（"x+" / "x-" / "z+" / "z-"）。')
+  if (up ? start.y >= targetY : start.y <= targetY) {
+    return [`🪜 我已经在 y=${start.y}，目标 y=${targetY} —— 不用挖了（换个目标 y 才有活干）。`]
+  }
+
+  const t0 = Date.now()
+  const notes = []
+  let cur = start.clone()
+  let dug = 0; let steps = 0
+  let reason = 'budget'
+  const MAX = Math.min(Math.max(1, Math.floor(maxSteps)), 128)
+  const blkAt = (x, y, z) => b.blockAt(new Vec3(x, y, z))
+
+  while (steps < MAX) {
+    if (Date.now() - t0 > budgetMs) { reason = 'budget'; break }
+    if (up ? cur.y >= targetY : cur.y <= targetY) { reason = 'done'; break }
+    const fx = cur.x + d.x; const fz = cur.z + d.z
+    /* 往上 / 往下各一步；脚下 (fy-1) 必须是实心（台阶面），不能踩空 */
+    const fy = up ? cur.y + 1 : cur.y - 1
+    /* 往下：走过去那一刻身体还占 cur.y / cur.y+1 ⇒ 挖 fy / fy+1 / fy+2 三格。
+     * 往上：脚下 (fy-1) 那格就是天然台阶面 ⇒ 只挖 fy / fy+1 两格。 */
+    const cells = up
+      ? [{ x: fx, y: fy, z: fz }, { x: fx, y: fy + 1, z: fz }]
+      : [{ x: fx, y: fy, z: fz }, { x: fx, y: fy + 1, z: fz }, { x: fx, y: fy + 2, z: fz }]
+    const names = cells.map((c) => blkAt(c.x, c.y, c.z)?.name ?? null)
+    if (names.some((n) => n == null)) { reason = 'unloaded'; break }
+    if (names.some((n) => isLiquid(n))) { reason = 'liquid'; break }
+    const floor = blkAt(fx, fy - 1, fz)
+    if (!floor) { reason = 'unloaded'; break }
+    if (isLiquid(floor.name)) { reason = 'liquid'; break }
+    if (isAir(floor.name)) { reason = 'no-floor'; break }
+
+    for (const c of cells) {
+      const blk = blkAt(c.x, c.y, c.z)
+      if (!blk || isAir(blk.name)) continue
+      try {
+        const r = await breakBlock(self, c, ctx)
+        if (r?.broken) dug++
+      } catch (e) {
+        notes.push(`⚠ 挖 ${c.x},${c.y},${c.z} 没成：${e?.message ?? e}`)
+      }
+    }
+
+    let w = null
+    try {
+      w = await self.walkTo({ x: fx, y: fy, z: fz }, { noDig: true, budgetMs: STAIR_STEP_MS, intent: 'stand' })
+    } catch (e) {
+      notes.push(`⚠ 走过去失败：${e?.message ?? e}`)
+    }
+    steps++
+    const now = b.entity.position.floored()
+    const ok = w?.arrived || (now.x === fx && now.z === fz && Math.abs(now.y - fy) <= 1)
+    cur = now
+    if (!ok) { reason = 'stuck'; break }
+    /* 平台已去掉：每步都是下降步 */
+  }
+
+  const now = b.entity.position.floored()
+  const left = up ? targetY - now.y : now.y - targetY
+  const body = `挖了 ${steps} 步、${dug} 块方块，从 y=${start.y} 到 y=${now.y}`
+  const tail = {
+    done: '✅ 到目标高度了。',
+    budget: '⏱ 这一轮 10 秒用完了 —— 再叫一次 `mc_dig {mode:"stair", y:' + targetY + '}` 接着挖（已经挖好的不会白挖）。',
+    liquid: '🌊 前面是水/岩浆，不往那边挖了 —— 换个方向（`dir:"x-"` 之类）或者先绕开。',
+    'no-floor': '🕳 前面脚下是空的（深洞/矿洞），不敢再挖 —— 换个方向，或者先看看那边是什么。',
+    stuck: '⛔ 挖开了但没走过去（卡住）—— 先 `mc_observe` 看一眼，别原地重叫。',
+    unloaded: '⏳ 前面的区块还没加载完 —— 等一下再叫。',
+  }[reason] ?? ''
+  const hint = reason === 'done' ? '' : `
+还剩 ${Math.max(0, left)} 格到 y=${targetY}。`
+  return [`🪜 阶梯：${body}。${hint}`, tail, ...notes].filter(Boolean)
+}
+
 export async function dig (self, {
   name = null, pos = null, maxDistance = 6, count = 1, allowDangerous = false,
   /* 2026-10-23 用户实机（「挖矿老是乱挖 / 够得到还搭方块」）：
@@ -342,7 +463,10 @@ export async function dig (self, {
    *   towerFallback：走不通时允不允许"垫一格方块往上"。默认 false —— 以前这个兜底
    *     无视 noTower 一律会跑，于是"明明够得到"也会原地搭柱子。 */
   noDig = true, towerFallback = false,
+  mode = 'block', dir = null, maxSteps = STAIR_MAX_STEPS, budgetMs = 10_000,
 } = {}, ctx = {}) {
+  /* 2026-10-25 用户：「下矿时 AI 更倾向直上直下，而不选择挖阶梯」⇒ stair 模式。 */
+  if (mode === 'stair') return await digStair(self, { pos, dir, maxSteps, budgetMs }, ctx)
   const b = self.requireBot()
   const out = []
   const held0 = heldText(b)
@@ -661,7 +785,11 @@ export async function dig (self, {
              *    表现成"挖一个、动一下"，可那一步多半是白走。 */
             const flew = await waitForPickup(self, b, { at: p }).catch(() => 0)
             if (flew > 0) out.push(`　（等了一下，${flew} 个掉落物自己飞进背包）`)
-            const got = await ctx.grabDrops(b)
+            /* 🔴 2026-10-25 用户：「为什么现在超过两格还是会去自动捡很远的掉落物」——
+             *   以前这里无条件 `grabDrops(b)`（默认半径 8）⇒ 等吸附没等到，就一路走过去把
+             *   8 格内的都捡了，表现成「挖一个、跑一趟」。现在只捡**脚边 2.5 格内**的；
+             *   更远的**不替它决定**，只在结果里报「地上还有 N 个」（dropHint），要捡就自己 `mc_move`。 */
+            const got = await ctx.grabDrops(b, { radius: 2.5 })
             if (got > 0) out.push(`　（顺手捡回 ${got} 个掉落物）`)
             else if (flew <= 0) {
               /* 一个都没捡到（够不着 / 卡住 / 背包满）⇒ 点一句"东西还在地上"。

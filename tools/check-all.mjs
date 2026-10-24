@@ -32,7 +32,7 @@ const ORDER = [
   'check-action-scheduler.mjs', 'check-perf-monitor.mjs', 'check-move-progress.mjs', 'check-bridge.mjs', 'check-terrain.mjs','check-chunk-model.mjs', 
   'check-water-navigation.mjs', 'check-water-recovery.mjs', 'check-task-epoch.mjs', 'check-msa.mjs', 'check-connection-stale.mjs',
   'check-mc-craft.mjs', 'check-mc-furnace.mjs', 'check-mc-chest.mjs', 'check-mc-trade.mjs', 'check-mc-farm.mjs', 'check-generic-names.mjs', 'check-mc-blueprint.mjs',
-  'check-spatial-map.mjs', 'check-look-track.mjs', 'check-mc-observe-host.mjs', 'check-mc-view-render.mjs', 'check-mc-skin.mjs',
+  'check-spatial-map.mjs', 'check-look-track.mjs', 'check-mc-stair.mjs', 'check-mc-observe-host.mjs', 'check-mc-view-render.mjs', 'check-mc-skin.mjs',
   'check-mc-auto.mjs', 'check-mc-deps.mjs', 'check-dep-guard.mjs',
   'check-session-memory.mjs', 'check-update-copy.mjs', 'check-rules-file.mjs', 'check-logging.mjs', 'check-watch-chat.mjs', 'check-chat-log.mjs', 'check-audit-session.mjs',
   'check-module-load.mjs',

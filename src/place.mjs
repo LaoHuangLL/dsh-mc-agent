@@ -86,14 +86,36 @@ export function placeRef (self, pos) {
  */
 export async function placeWhileJumping (b, refBlock, face, { tries = 3 } = {}) {
   let lastErr = null
+  /* 🔴 2026-10-25 实机（用户：「水里搭不了方块的原因是上浮比普通跳跃慢」）：
+   *   水里按住 jump 的上浮速度只有 ~0.6 格/秒（陆上起跳是瞬间 1.25 格），
+   *   700ms 只升得到 0.42 格 —— 贴着水面往上垫一格时常常等不到“脚离格”，直接判失败。
+   *   水里放宽到 2500ms；并且只要小数部分还在涨就继续等（别把“慢”当成“卡住”）。 */
+  const WATER_RE = /^(water|flowing_water|bubble_column|kelp|kelp_plant|seagrass|tall_seagrass)$/
+  const inWater = (() => {
+    try {
+      if (b.entity?.isInWater === true) return true
+      const p = b.entity?.position?.floored?.()
+      if (!p) return false
+      return WATER_RE.test(String(b.blockAt(p, false)?.name ?? ''))
+        || WATER_RE.test(String(b.blockAt(p.offset(0, 1, 0), false)?.name ?? ''))
+    } catch (e) { return false }
+  })()
+  const waitMs = inWater ? 2500 : 700
   try { b.setControlState('jump', true) } catch {}
   try {
     for (let i = 0; i < tries; i++) {
       // 等脚真的离开整格（`position.y` 的小数部分不再是 0）
       const t0 = Date.now()
-      while (Date.now() - t0 < 700) {
+      let bestFrac = -Infinity
+      let lastProgress = Date.now()
+      while (Date.now() - t0 < waitMs) {
         const y = b.entity?.position?.y
-        if (typeof y === 'number' && y - Math.floor(y) > 0.05) break
+        if (typeof y === 'number') {
+          const frac = y - Math.floor(y)
+          if (frac > 0.05) break
+          if (frac > bestFrac + 0.02) { bestFrac = frac; lastProgress = Date.now() }
+          else if (inWater && Date.now() - lastProgress > 800) break
+        }
         await sleep(20)
       }
       try {

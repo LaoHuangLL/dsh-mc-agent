@@ -263,6 +263,7 @@ section('⑦ 原地搭高（垫脚）—— 必须先离地再放')
   ok(/Server refused to place/.test(placeSrc) && /服务端拒了在/.test(placeSrc),
     '英文 "Server refused to place" 仍然翻译成人话（且带上坐标）')
   ok(/export async function placeWhileJumping/.test(placeSrc), 'placeWhileJumping 是导出的（可单测）')
+ok(/const waitMs = inWater \? 2500 : 700/.test(placeSrc), '水里等脚离格放宽到 2.5 秒（上浮比陆上跳慢）')
 }
 
 /* ─────────────────────── ⑧ 目标格 = 自己站的那一格 ⇒ 跳起来放 ─────────────────────── */

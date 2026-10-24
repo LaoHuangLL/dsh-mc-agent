@@ -1292,7 +1292,7 @@ section('⑬ 长路线续行 + 地形局部重估（2026-10-18 审计 P1）')
 {
   const src = readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8')
   ok(/export function routeTrack/.test(src), '续行账本导出（只读，不改路线）')
-  ok(/\{ \.\.\.outInfo, route \}/.test(src), 'walkTo 把 route 挂到结果上')
+  ok(/return pruneMove\(outInfo\)/.test(src), 'walkTo 把 route 从结果里剔掉（2026-10-24 输出瘦身）')
   ok(/bMv\.__moveFail/.test(src) && /repeat: n/.test(src), '① 失败去重：同目标同原因连着重试只回一行')
   ok(/const enRoute = !outInfo\.arrived/.test(src) && /走了 \$\{Math\.round/.test(src), '③ 中途极简：还在路上只报走了几格、还剩几格')
   ok(/let terrain = classifyTerrainCached\(b\)/.test(src) && /terrainReeval \? \{ terrainReeval \}/.test(src),
@@ -2400,6 +2400,16 @@ section('㉖ 2026-10-24 导航世界模型：实体 / 未加载 / 岩浆 都不�
   ok(/stuckMs: stuckMsNow/.test(src) && /const stepNow = attempt > 0 \? escapeStepOf/.test(src), '判卡用的是当前那一级的等待时间')
   ok(/repath: 900/.test(src) && /detour: 1500/.test(src) && /breakAhead: 2400/.test(src), '便宜招远短于 2.4 秒，只有挖方块保持 2.4 秒')
   ok(/STEP_UP_TRIES = 1/.test(src), '局部台阶一次移动只试一次')
+  /* 2026-10-25 实机（上阶梯卡住、头顶是空的）：跳了却没上去 ⇒ 先起跳再前进，且等朝向生效 */
+  ok(/export const STEP_UP_TURN_MS = 150/.test(src), '看向后等朝向生效（150ms）再动')
+  ok(/export const STEP_UP_JUMP_MS = 80/.test(src), '先单独起跳 80ms 再叠 forward')
+  {
+    const i0 = src.indexOf('export async function stepUp')
+    const seg = src.slice(i0, src.indexOf('export async function escapeMove', i0))
+    const ij = seg.indexOf("setControlState('jump', true)")
+    const iw = seg.indexOf("setControlState('forward', true)")
+    ok(ij > 0 && iw > ij, 'jump 在 forward 之前（不再同时按下）')
+  }
 }
 console.log(`check-move-progress：pass=${pass} fail=${fail}`)
 process.exit(fail ? 1 : 0)

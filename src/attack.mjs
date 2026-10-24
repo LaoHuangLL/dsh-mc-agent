@@ -507,7 +507,6 @@ export async function attack (b, { who = null, budget = 20_000, kite = false, pr
     if (hardHurt) notes.push(`这一轮挨了 ${(hpStart - Number(b.health)).toFixed(0)} 点伤害 —— 血掉太快，提前收手`)
     return {
       attacked: label, distance: d, swings, killed, gone, health: b.health,
-      ...(swing ? { swingMs: swing.ms, swingWeapon: swing.weapon } : {}),
       ...(notes.length ? { note: notes.join('；') } : {}),
       ...(pickup ? { pickup } : {}),
       ...(drops.length ? { drops } : {}),

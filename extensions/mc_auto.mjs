@@ -1157,10 +1157,26 @@ export function createAuto ({ registry, logLine = () => {}, workspaceOf = null, 
      * 🔴 摔伤是例外（P0-B）：打断移动对"正在往下掉"毫无帮助，只会让 AI 失去上下文 ——
      *    实机那天 `stopWork` 把 `mc_move` 掐成 `preempted`，AI 于是又重发、又掉 14 格。 */
     const fallOnly = fell != null && !drown && !threat
-    const stopped = (fallOnly || cfg.dangerStopWork === false) ? null : stopWork(s, sess)
-    const stopLine = stopped === null
-      ? ''
-      : `⏸ 我已经先把手里的活停下了（寻路 / 采集 / 控制位都松开了${stopped}）—— 现在你说了算。`
+    /* 🔴 2026-10-25 实机（用户：「我看它基本没浮起来，自救没用了？」）：
+     *   憋气叫醒以前**照样**先停手，于是每次 `mc_move {mode:"swim"}` 刚上浮两秒就被自己人掐掉
+     *   （日志 01:05:28 / 01:05:53 / 01:05:59 三条「已打断当前移动：自保：先停手」，对应
+     *   a59 1789ms、a61 6426ms、a62 804ms —— 全是 completed 而不是上浮成功）。
+     *   氧气 7→6→0→-1、血 20→19→4，全是被自己打断的。
+     *   憋气是**唯一一种"打断就等于自毁"**的险情：叫醒的目的就是让 AI 上浮，而 AI 往往正在上浮。
+     *   判据：纯憋气（没有同时挨打/摔伤/踩危险方块/火球/龙息/窒息）+ 现在真有移动动作在跑
+     *   ⇒ 不打断，只发消息。挖矿时憋气（没有移动动作在跑）仍然照停 —— 那种情况确实该停。 */
+    const drownOnly = drown === true && !threat && !fell && !block && !ball && !breath && !suffocate
+    const movingNow = (() => {
+      try {
+        const sch = sess?.bot?.actionScheduler?.()
+        const list = typeof sch?.list === 'function' ? sch.list() : []
+        return list.some((a) => /mc_move|auto:water|mc_sequence/.test(String(a?.name ?? '')))
+      } catch { return false }
+    })()
+    const stopped = (fallOnly || (drownOnly && movingNow) || cfg.dangerStopWork === false) ? null : stopWork(s, sess)
+    const stopLine = stopped !== null
+      ? `⏸ 我已经先把手里的活停下了（寻路 / 采集 / 控制位都松开了${stopped}）—— 现在你说了算。`
+      : (drownOnly && movingNow ? '⏳ 我**没有**打断你正在做的移动 —— 你在上浮/游动，接着游，别停。' : '')
     /* 🔴 2026-10-23 审计（战斗层报告 C[4]）：踩到岩浆/火/仙人掌以前**只 pushAutoEvent**、
      *    不叫醒 AI —— 要等空闲那一次叫醒，而空闲叫醒和它共用一份配额、120 秒就过期。
      *    现在给它一条专属报法（仍然只叫醒，不替 AI 移动）。 */

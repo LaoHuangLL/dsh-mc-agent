@@ -305,7 +305,9 @@ section('⑥ 够得着就原地挖 —— 复核过才算挖掉，掉落物要�
      *    但 **`type` 是 `'other'`**（不是 `'object'`）—— 实机就是被这一点坑的
      *    （`#grabDrops` 里那句 `e.type !== 'object'` 让它永远返回 0）。
      *    另外塞一头牛：`displayName: 'Cow'` 的**非**掉落物绝不能被交给 collectBlock。 */
-    const drop = { type: 'other', name: 'item', displayName: 'Item', position: new Vec3(0.5, 64, 3.5), isValid: true }
+    /* 🔴 2026-10-25：掉落物改到**脚边 1.8 格**（原来 3.5 格）—— 挖完只捡 2.5 格内的，
+     *    更远的不替它决定（用户：「超过两格还是会去自动捡很远的掉落物」）。 */
+    const drop = { type: 'other', name: 'item', displayName: 'Item', position: new Vec3(0.5, 64, 1.8), isValid: true }
     const cow = { type: 'mob', name: 'cow', displayName: 'Cow', position: new Vec3(1.5, 64, 3.5), isValid: true }
     b.entities = { 7: drop, 9: cow }
     /* 🔴 `#grabDrops` 现在按**背包差**报数（不再看 `e.isValid` —— 实机上那个字段来不及变 false），

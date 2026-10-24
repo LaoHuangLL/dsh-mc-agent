@@ -92,6 +92,8 @@ ok(/const doorHere = Boolean\(b && typeof b\.name === 'string'/.test(indexSrc) &
  *         `placing` 永远为 true ⇒ 每 tick 都在 `tryAcquire` 处 return，永久卡死。 */
 ok(/let placingStartedAt = 0/.test(indexSrc) && /resetPath\('place_jump_timeout'\)/.test(indexSrc),
   '垫柱跳跃有专用超时：达不到放置高度时松开 jump 并结束这条路径（不再绕过 3500ms 卡住检测）')
+ok(/let placingBestY = 0/.test(indexSrc), '垫柱跳每跳记下最高点（有进展就重计时）')
+ok(/inWater \? 6000 : 1500/.test(indexSrc), '水里垫柱放宽到 6 秒（上浮只有 ~0.6 格/秒）')
 ok(/resetPath\('equip_error'\)/.test(indexSrc),
   '装备失败会释放锁并结束这条路径（不再永久卡在 placing 状态）')
 

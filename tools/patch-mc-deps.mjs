@@ -75,7 +75,7 @@ console.log('mineflayer-pathfinder/index.js:')
 
 rep(
   '  let placingBlock = null\n  let lastNodeTime = performance.now()',
-  '  let placingBlock = null\n  let placingStartedAt = 0\n  let digStartedAt = 0\n  let lastNodeTime = performance.now()',
+  '  let placingBlock = null\n  let placingStartedAt = 0\n  let placingBestY = 0\n  let digStartedAt = 0\n  let lastNodeTime = performance.now()',
   '计时变量：placingStartedAt / digStartedAt'
 )
 
@@ -88,6 +88,7 @@ rep(
   `      if (!placing) {
         placing = true
         placingStartedAt = performance.now()
+        placingBestY = bot.entity.position.y
         placingBlock = nextPoint.toPlace.shift()
         fullStop()
       }`,
@@ -103,14 +104,29 @@ rep(
   `      let canPlace = true
       if (placingBlock.jump) {
         /* 🔴 2026-10-24 DSH 补丁：原来"先按 jump，再判断够不够高"，
-         * 而这条路径末尾的 \`return\` 在 3500ms 卡住检测**之前** ——
+         * 而这条路径末尾的 "return" 在 3500ms 卡住检测**之前** ——
          * 头顶被顶板 / 树叶挡住、永远升不到放置高度时，jump 会一直按着，
          * 卡住检测永远轮不到它。实机现象：「正在垫方块往上爬，悬空超过 3 秒才掉下来」。
          * 现在：达不到高度只按有限的时间（bot.pathfinder.placeJumpTimeout，默认 1500ms），
          * 到点就松开 jump 并 resetPath，让外层照常重算 / 换招。 */
         canPlace = placingBlock.y + 1 < bot.entity.position.y
         if (!canPlace) {
-          const jumpLimit = bot.pathfinder.placeJumpTimeout ?? 1500
+          /* 🔴 2026-10-25 DSH 补丁（用户：「水里搭不了方块的原因是上浮比普通跳跃慢」）：
+           *   水里按住 jump 的上浮速度只有 ~0.6 格/秒（陆上起跳是瞬间 1.25 格），
+           *   1500ms 根本升不到放置高度 ⇒ 每次都被判超时，水下垫柱子/搭桥永远失败。
+           *   两处放宽：① 水里时限放到 6 秒（陆上仍是 1500）；
+           *   ② 只要这一跳还在往上走（比本跳最高点又高 0.15 格）就重新计时，
+           *   别把“慢慢在上升”当成“卡住了”。
+           */
+          const yNow = bot.entity.position.y
+          if (yNow > placingBestY + 0.15) {
+            placingBestY = yNow
+            placingStartedAt = performance.now()
+          }
+          const isW = (nm) => /^(water|flowing_water|bubble_column|kelp|kelp_plant|seagrass|tall_seagrass)$/.test(String(nm ?? ""))
+          const inWater = bot.entity?.isInWater === true
+            || (() => { try { return isW(bot.blockAt(bot.entity.position.floored(), false)?.name) || isW(bot.blockAt(bot.entity.position.floored().offset(0, 1, 0), false)?.name) } catch (e) { return false } })()
+          const jumpLimit = bot.pathfinder.placeJumpTimeout ?? (inWater ? 6000 : 1500)
           if (performance.now() - placingStartedAt > jumpLimit) {
             bot.setControlState('jump', false)
             resetPath('place_jump_timeout')
@@ -121,7 +137,7 @@ rep(
         }
         bot.setControlState('jump', false)
       }`,
-  '垫柱跳跃：限时 + 达不到高度就松手'
+  '垫柱跳跃：限时 + 水里放宽 + 有进展就重计时'
 )
 
 rep(
@@ -312,6 +328,50 @@ repIn(
       if (!blockD.physical && !blockD.liquid) {
         if (node.remainingBlocks === 1) return // not enough blocks to place`,
   '水里不垫方块：脚下那格是水'
+)
+
+/* ── 2026-10-25：move 不许"挖脚下"直上直下（用户：下矿应该挖阶梯） ──────── */
+repIn(
+  join(PF_DIR, 'lib', 'movements.js'),
+  `    const blockLand = this.getLandingBlock(node, { x: 0, z: 0 })
+    if (!blockLand) return
+
+    cost += this.safeOrBreak(block0, toBreak)
+    if (cost > 100) return
+
+    if (this.getBlock(node, 0, 0, 0).liquid) return // dont go underwater`,
+  `    const blockLand = this.getLandingBlock(node, { x: 0, z: 0 })
+    if (!blockLand) return
+
+    cost += this.safeOrBreak(block0, toBreak)
+    if (cost > 100) return
+
+    /* 🔴 2026-10-25 DSH 补丁（用户：「下矿的时候 AI 更倾向直上直下，而不选择挖阶梯」）：
+     * 要**挖**才能掉下去 ⇒ 这条边直接判不可行。已经挖通的空气柱（toBreak 为空）照常掉，
+     * 想开竖井 / 斜井请显式用 mc_dig {mode:\"stair\"}。
+     * 原因：竖井下一层 cost = 1 + digCost×digTime ≈ 9.8，阶梯下两层 ≈ 18，
+     * A* 永远选竖井；而竖井 >maxDropDown(3) 格之后自己也下不去（没有落点），
+     * 挖完基本废掉。阶梯挖一次永久可通行。 */
+    if (toBreak.length > 0) return
+
+    if (this.getBlock(node, 0, 0, 0).liquid) return // dont go underwater`,
+  'move 不挖脚下：getMoveDown'
+)
+
+repIn(
+  join(PF_DIR, 'lib', 'movements.js'),
+  `    cost += this.safeOrBreak(blockD, toBreak)
+    if (cost > 100) return
+
+    if (blockC.liquid) return // dont go underwater`,
+  `    cost += this.safeOrBreak(blockD, toBreak)
+    if (cost > 100) return
+
+    /* 🔴 2026-10-25 DSH 补丁：斜着往下掉也**不许边挖边掉**（同上）。 */
+    if (toBreak.length > 0) return
+
+    if (blockC.liquid) return // dont go underwater`,
+  'move 不挖脚下：getMoveDropDown'
 )
 
 /* ── 其它补丁只做存在性检查（改法在踩坑档案里，不在这里重放） ───────────── */

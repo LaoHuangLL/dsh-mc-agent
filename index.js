@@ -2832,7 +2832,7 @@ export function apply(ctx, rawConfig) {
     if (s.online) {
       const p = s.position ?? {}
       bits.push(
-        `我在 (${p.x}, ${p.y}, ${p.z})`,
+        `我在 (${p.x}, ${p.y}, ${p.z})（y=脚底那格，脚下方块在 y-1）`,
         /* 2026-10-23 审计：mc_observe 用度（yaw=180°）、mc_status 原来用弧度（yaw 3.14），
          * 同一个朝向两个口径会让模型读错。统一成度。 */
         `朝 yaw ${Math.round((((s.yaw * 180) / Math.PI) % 360 + 360) % 360)}° / pitch ${Math.round((s.pitch * 180) / Math.PI)}°`,
@@ -3006,7 +3006,10 @@ export function apply(ctx, rawConfig) {
           + (r.motd ? `\nMOTD：${r.motd}` : '')
         : `📡 ${where} 不通（${r.elapsedMs ?? '?'}ms）：${r.error ?? '未知原因'}`
           + (r.hint ? `\n${r.hint}` : '')
-      return { ...r, text }
+      /* 🔴 2026-10-25 回归：瘦身时误把 `ok`/`code` 也删了 —— 那是**错误语义**（宿主/调度靠它判失败），
+       *    不是给人看的冗余字段。selfcheck 那条「工具路径也不抛异常、原样回 ok:false」当场抓到。
+       *    现在只留 ok + code + text，其余（host/port/timeoutMs/elapsedMs/motdRaw…）不重复。 */
+      return { ok: r.ok === true, ...(r.ok === true ? {} : { code: r.code ?? 'PING_FAILED' }), text }
     },
   }))
 
@@ -3073,7 +3076,8 @@ export function apply(ctx, rawConfig) {
       return {
         connected: true,
         account: accView ? { innerID: accView.innerID, name: accView.name, type: accView.type } : null,
-        ...st, chunksReady: ready,
+        position: st.position, gamemode: st.gamemode, dimension: st.dimension,
+        chunksReady: ready,
         // 连接信息（host/port/子服）已在 status() 里；这里**不再**回带
         // `_connectionProfile`（那份含 authMode 与账号名，没必要发出去）。
         watchdog: armed ? '已自动挂载' : '未挂载（autoArm 关闭）',
@@ -3515,7 +3519,7 @@ export function apply(ctx, rawConfig) {
           ? `🧱 周围 ${r.radius} 格（上下 ${r.height}）共 ${total} 个方块（最少的 ${shown.length} 种，从少到多）：`
           : `🧱 周围 ${r.radius} 格（上下 ${r.height}）共 ${total} 个方块：`
         return {
-          ...r,
+          total: r.total ?? null, unloaded: r.unloaded ?? 0,
           text: `${head}${list || '（空的）'}${more}`
             + `${restPct > 0.05 && restKinds > 0 ? `；其余 ${restKinds} 种共 ${fmtPct(restPct)}` : ''}`
             + `${r.unloaded ? `；另有 ${r.unloaded} 格未加载（不算空）` : ''}`
@@ -3530,7 +3534,7 @@ export function apply(ctx, rawConfig) {
         const where = `周围 ${r.radius ?? args.radius ?? 16} 格（上下 ${r.height ?? args.height ?? 4}）`
         if (!found.length) {
           return {
-            ...r,
+            total: r.total ?? null, unloaded: r.unloaded ?? 0,
             text: `⛏ ${where}没找到 ${args.name}`
               + (r.unloaded ? `（但有 ${r.unloaded} 格未加载 —— **不算"没有"**，可以走近再看）` : ''),
           }
@@ -3541,7 +3545,7 @@ export function apply(ctx, rawConfig) {
           + `${blk.ripe === true ? ' 熟' : (blk.ripe === false ? ' 没熟' : '')}`
           + `${blk.age != null && blk.maxAge != null ? ` ${blk.age}/${blk.maxAge}` : ''}`)
         return {
-          ...r,
+          total: r.total ?? null, unloaded: r.unloaded ?? 0,
           text: `⛏ ${args.name}：${r.total} 个`
             + `${found.length < r.total ? `（列最近 ${found.length} 个）` : ''}\n`
             + items.join('\n')
@@ -3655,7 +3659,6 @@ export function apply(ctx, rawConfig) {
       const out = {
         center: hm.center, radius: hm.radius, unloadedTiles: hm.unloaded, mode: hm.mode,
         ...(hm.layer ? { layer: hm.layer } : {}),
-        legend: hm.legend.slice(0, 15),
         format,
         /* ── 2026-10-15 结构化地图数据 ──
          * `cellSize` = 字符图每一格代表几个方块（= `glyphStep`）：字符图上的"第 i 行第 j 列"
@@ -3664,15 +3667,10 @@ export function apply(ctx, rawConfig) {
         purpose,
         cellSize: step,
         origin: { x: hm.originX ?? (hm.center.x - hm.radius), z: hm.originZ ?? (hm.center.z - hm.radius) },
-        bounds: hm.bounds ?? {
-          minX: hm.center.x - hm.radius, maxX: hm.center.x + hm.radius - 1,
-          minZ: hm.center.z - hm.radius, maxZ: hm.center.z + hm.radius - 1,
-        },
         complete: hm.complete ?? !hm.truncated,
         hazards: (hm.hazards ?? hazardCellsOf(hm, { limit: 12 })).slice(0, 12),
         nearbyTargets: nav.nearbyTargets,
       }
-      if (mode === 'floor' && hm.counts) out.tiles = hm.counts
       if (format === 'chars' || format === 'both') {
         out.glyphMap = McBot.glyphMap(hm.names, step, { x: hm.radius, y: hm.radius }, { compress: args.compress === true })
       }
@@ -3682,7 +3680,8 @@ export function apply(ctx, rawConfig) {
           layer: args.layer, depth: args.depth,
         })
         const png = encodePng(img.width, img.height, img.rgba)
-        out.image = { width: img.width, height: img.height, bytes: png.length, scale: img.scale }
+        /* 输出瘦身：图的尺寸/字节数对 AI 没用，路径与附件才有用。 */
+        out.image = {}
 
         // ① 内联给模型/前端看
         const att = ctx.get('attachments')
@@ -3774,7 +3773,8 @@ export function apply(ctx, rawConfig) {
     output: text(),
     async execute(args, exec) {
       const sess = getSession(exec)
-      return sess.bot.inventory()
+      const inv = sess.bot.inventory()
+      return { text: inv.text }
     },
   }))
 
@@ -3834,7 +3834,7 @@ export function apply(ctx, rawConfig) {
       + 'mode="swim" 在水里游到 x/y/z（不给坐标就只上浮换气）。\n'
       + 'mode="boat" 开船（先 use 上船；下船用 mode="dismount"）。\n'
       + '🔴 **一次只走 10 秒**。没走到返回 `arrived:false`+`remaining`+`hint`——**再叫一次往同一目标走**。\n'
-      + '🔴 水里会自动游；快淹死用 `mode:"swim"` 不给坐标（只上浮换气）。\n'
+      + '快淹死用 `mode:"swim"`（不给坐标）。\n'
       + '🔴 **默认不挖方块**：走路一格都不挖，只绕路/跳/下蹲过缝；'
       + '要挖必须显式 `noDig:false`（`mode:"walk-nodig"` 恒不挖）。\n'
       + '🔴 默认不垫 1×1 柱（`allowTower:true` 才允许）；上高处走斜台阶会报 `pillaredWith`。\n'
@@ -3849,7 +3849,9 @@ export function apply(ctx, rawConfig) {
       + '默认不挖时**没有"挖"这一级**：开门→重算→跳→后退→绕行→垫柱。'
       + '`planTried` 列出真试过哪几级。同目标 90 秒内再叫会**从上次那级接着升**。',
     parameters: {
-      x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' },
+      x: { type: 'number' },
+      y: { type: 'number', description: '脚底那格：y=77 站在 76 的方块上，不是 76 那块' },
+      z: { type: 'number' },
       mode: { type: 'string', description: 'walk / walk-nodig / fly / jump / swim / boat（创造缺省 fly；jump 不需坐标；swim 不给坐标=只上浮换气；boat 要先上船）' },
       noDig: { type: 'boolean', description: '走路时挖不挖方块（**默认不挖**）；要挖穿挡路的写 false' },
       xz: { type: 'boolean', description: '长程赶路：只给 x/z 就够（按"到那一列"算 GoalXZ）；给了 y 就按 y 走；写 false 等于必须给 y；fly/boat 仍必须给 y' },
@@ -3940,7 +3942,9 @@ export function apply(ctx, rawConfig) {
     parameters: {
       mode: { type: 'string', description: '见上面各 mode（默认 look）' },
       who: { type: 'string', description: '玩家/实体名（look/toward/use）' },
-      x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' },
+      x: { type: 'number', description: '要动的那一块的方块坐标 x（整数格）' },
+      y: { type: 'number', description: '要动的那一块的方块坐标 y（整数格）' },
+      z: { type: 'number', description: '要动的那一块的方块坐标 z（整数格）' },
       allowDangerous: { type: 'boolean', description: 'break：允许挖自己脚下的支撑（默认拦）' },
       name: { type: 'string', description: '方块或物品名（place/equip/toss 用）' },
       to: { type: 'string', description: 'equip 装哪格：head/torso/legs/feet/off-hand；只给=脱掉' },
@@ -4092,7 +4096,9 @@ export function apply(ctx, rawConfig) {
       + '· 落点误差 > 4 格会拒射并说明"太远/角度刁"，不瞎射。',
     parameters: {
       who: { type: 'string', description: '目标实体名（如 ender_dragon）' },
-      x: { type: 'number', description: '目标 x（射水晶/坐标用）' }, y: { type: 'number' }, z: { type: 'number' },
+      x: { type: 'number', description: '目标 x（整数格，射水晶/坐标用）' },
+      y: { type: 'number', description: '目标 y（整数格；不给就按自动瞄点）' },
+      z: { type: 'number', description: '目标 z（整数格）' },
       count: { type: 'number', description: '连射几箭（默认 1，≤5）' },
       waitTime: { type: 'number', description: '拉弓多久再放（默认 1200ms）' },
       weapon: { type: 'string', description: '用什么射（默认 bow；可 crossbow/trident）' },
@@ -4163,7 +4169,9 @@ export function apply(ctx, rawConfig) {
       option: { type: 'number', description: 'enchant 第几项（0/1/2）' },
       action: { type: 'string', description: 'anvil：combine（默认）/ rename' },
       template: { type: 'string', description: 'smithing 的模板（默认自己挑）' },
-      x: { type: 'number', description: '方块坐标 x（可选，和 y/z 一起给）' }, y: { type: 'number' }, z: { type: 'number' },
+      x: { type: 'number', description: '方块坐标 x（整数格，可选，和 y/z 一起给）' },
+      y: { type: 'number', description: '方块坐标 y（整数格）' },
+      z: { type: 'number', description: '方块坐标 z（整数格）' },
     },
     output: text(undefined, (a, v) => String(v?.text ?? compactJson(v))),
     timeoutMs: CALL_MS + 1_000,
@@ -4255,8 +4263,8 @@ export function apply(ctx, rawConfig) {
       + '🔴 **层数模式一定要给原点 x/y/z**（不给就用脚下这格）：人被垫高、走开几步之后"脚下这格"就变了，'
       + '重发会盖到别处去。结果里的 origin 就是这次用的原点，重发时原样带上。',
     parameters: {
-      x1: { type: 'number' }, y1: { type: 'number' }, z1: { type: 'number' },
-      x2: { type: 'number' }, y2: { type: 'number' }, z2: { type: 'number' },
+      x1: { type: 'number', description: '一角 x（整数格）' }, y1: { type: 'number', description: '一角 y（整数格）' }, z1: { type: 'number', description: '一角 z（整数格）' },
+      x2: { type: 'number', description: '另一角 x（整数格）' }, y2: { type: 'number', description: '另一角 y（整数格）' }, z2: { type: 'number', description: '另一角 z（整数格）' },
       name: { type: 'string', description: '用哪种方块（缺省背包第一种；**建议显式给**，重发时才认得出哪些已经放对了）' },
       max: { type: 'number', description: '最多放几个（默认 64，防手滑）' },
       layers: {
@@ -4302,9 +4310,18 @@ export function apply(ctx, rawConfig) {
     name: 'mc_dig',
     description: '挖方块：给 name 挖最近的，或给 pos 挖指定坐标；count 可连续挖多个（会自己换成对的工具；结果带 held）。\n'
       + '🔴 **一次只挖 10 秒的量**（用户要求：单次调用别超过 11 秒）。没挖完会返回"这一轮的 11 秒用完了"——'
-      + '**再叫一次 mc_dig 接着挖**就行（挖到的方块留在背包里，不会白挖）。',
+      + '**再叫一次 mc_dig 接着挖**就行（挖到的方块留在背包里，不会白挖）。\n'
+      + '🪜 **要挖阶梯就用 `mode:"stair"`**（给 y 目标高度、x/z 朝哪挖）：1 格宽 3 格高，每步升/降 1 格（不留平台），'
+      + '挖完永久能上下、不会摔伤。**目标 y 比现在低就是往下挖、高就是往上挖**（上升阶梯也行）。'
+      + '**别指望 mc_move 挖竖井 —— 已经禁掉了**（挖脚下直下不再允许）。',
     parameters: {
-      name: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' },
+      mode: { type: 'string', description: 'block（默认，挖方块）/ stair（挖阶梯：给 y 目标高度，x/z 指定朝哪挖；目标比现在低就是往下、高就是往上）' },
+      dir: { type: 'string', description: 'stair 专用：朝哪挖 "x+"/"x-"/"z+"/"z-"（不给就按 x/z 或当前朝向）' },
+      maxSteps: { type: 'number', description: 'stair 专用：最多挖几步（默认 64）' },
+      name: { type: 'string' },
+      x: { type: 'number', description: '要挖的那一块的方块坐标 x（整数格）' },
+      y: { type: 'number', description: '要挖的那一块的方块坐标 y（整数格；脚下那块是 y-1）' },
+      z: { type: 'number', description: '要挖的那一块的方块坐标 z（整数格）' },
       maxDistance: { type: 'number', description: '搜索半径（**默认 8**；树/矿脉远的话给大一点，上限看场景）' },
       count: { type: 'number', description: '挖几个（默认 1，上限 16；一次挖不完就再叫一次）' },
       allowDangerous: { type: 'boolean', description: '允许挖自己脚下的支撑（默认拦，下面没落脚点就掉下去）' },
@@ -4321,6 +4338,9 @@ export function apply(ctx, rawConfig) {
       const pos = (args.x !== undefined && args.y !== undefined && args.z !== undefined)
         ? coordOf(args) : null
       const lines = await sess.bot.dig({
+        mode: args.mode === 'stair' ? 'stair' : 'block',
+        dir: args.dir ? String(args.dir) : null,
+        maxSteps: args.maxSteps,
         name: args.name ? String(args.name) : null, pos,
         /* 2026-10-23：默认搜索半径 16 → 8。16 格外的矿一律要被走过去，而"走过去"正是
          *   乱挖/垫柱的来源；8 格内的矿基本都在身边，挖起来干脆。远处的先 mc_move 靠近。 */
@@ -4336,7 +4356,7 @@ export function apply(ctx, rawConfig) {
        * `error/reason/note/why/hint/text` —— 只回 `result` 的话它们**一个字都读不到**，
        * 于是"挖成功 / 服务端拒了 / 时间到"三种结局在台账里长得一模一样（每轮记一次失败，
        * 3 轮后任务被误判成 blocked）。`text()` 渲染器优先用 `text`，模型看到的也更清爽。 */
-      return { result: lines, text: lines.join('\n') }
+      return { text: lines.join('\n') }
     },
   }))
 
@@ -4620,10 +4640,8 @@ export function apply(ctx, rawConfig) {
             asTag: true, x: args.x ?? 0, y: args.y ?? 0, width: args.width, height: args.height,
           })
           // data URI 很长，别原样刷屏：给长度 + 现成标签 + 用法
-          return {
-            file: r.file, mime: r.mime, bytes: r.bytes, dataUriLength: r.dataUri.length,
-            tag: r.tag, note: r.note,
-          }
+          /* 输出瘦身：bytes/dataUriLength 是排查用的，AI 只需要"存哪了、是什么"。 */
+          return { file: r.file, mime: r.mime, tag: r.tag, note: r.note }
         }
 
         case 'render': {
@@ -4648,7 +4666,7 @@ export function apply(ctx, rawConfig) {
           ImageEngine.save(out, r.svg)
           return {
             svg: `${r.width}x${r.height}`, cells: r.cells, layout: `${r.cols}x${r.rows}`,
-            file: out, bytes: Buffer.byteLength(r.svg),
+            file: out,
             note: '这是**可继续编辑的 SVG 文本**：想加标注就改这个文件（画 <rect stroke>、加 <text>），'
               + '再 mc_kit_image{action:"render"} 光栅化成 PNG。',
           }

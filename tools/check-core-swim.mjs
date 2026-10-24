@@ -568,6 +568,44 @@ section('⑧ 游泳：按目标高度决定上浮 + 连续没靠近就收手')
   }
 }
 
+/* ─────────── ⑨ 头顶封死：立刻说清，别白按 jump ─────────── */
+/* 2026-10-25 实机（用户：「我看它基本没浮起来，自救没用了？」）：以前头顶是实心方块时
+ * 照样按满 hold 的 jump，rose 恒 0，最后只回"没上去" —— AI 只能自己猜"头顶哪格挡着"。 */
+section('⑨ 头顶封死 —— 立刻返回 ceiling，一次 jump 都不按')
+{
+  const { bot, calls } = mkBot({ inWater: true, air: 6, y: 53 })
+  bot.blockAt = () => ({ name: 'stone', position: new Vec3(0, 54, 0) })
+  const mc = mkMc(bot)
+  const t0 = Date.now()
+  const r = await mc.swimUp({ hold: 3_000 })
+  const ms = Date.now() - t0
+  ok(r.reason === 'ceiling', '返回 reason=ceiling', JSON.stringify(r.reason))
+  ok(r.ceiling?.name === 'stone', '报出天花板方块名', JSON.stringify(r.ceiling))
+  ok(r.rose === 0 && r.heldMs === 0, 'rose/heldMs 都是 0（没白按）')
+  ok(!jumpOn(calls), '一次 jump 都没按')
+  ok(ms < 500, '几乎立刻返回（不是等满 3 秒）', `${ms}ms`)
+  ok(/上浮没路/.test(String(r.hint)) && /mc_act/.test(String(r.hint)), 'hint 说清"上浮没路"并给出挖开/挖空气袋的做法')
+}
+section('⑩ 头顶是水草/气泡柱 —— 不算封死，照常上浮')
+{
+  for (const nm of ['seagrass', 'kelp', 'bubble_column', 'water']) {
+    const { bot, calls } = mkBot({ inWater: true, air: 6, y: 53, after: { ms: 120, inWater: false, air: 20, y: 55 } })
+    bot.blockAt = () => ({ name: nm, position: new Vec3(0, 54, 0) })
+    const mc = mkMc(bot)
+    const r = await mc.swimUp({ hold: 1_000 })
+    ok(r.reason !== 'ceiling' && jumpOn(calls), `${nm} 不当天花板（照常按 jump）`)
+  }
+}
+section('⑪ 静态接线：ceiling 早退在 bumpGen 之前')
+{
+  const src = readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8')
+  const iCeil = src.indexOf("reason: 'ceiling'")
+  const iBump = src.indexOf('const gen = bumpGen()', Math.max(0, iCeil))
+  ok(iCeil > 0, 'movement.mjs 有 reason: ceiling 分支')
+  ok(iBump > iCeil, '天花板检查在领移动号之前（不推代次、不打断别人）')
+  ok(/const ceilingOf = \(\) =>/.test(src), '有 ceilingOf() 读头顶两格')
+}
+
 /* ─────────── 收尾 ─────────── */
 for (const d of TMP_DIRS) { try { rmSync(d, { recursive: true, force: true }) } catch {} }
 console.log(`\n结果：${pass}/${pass + fail} 通过，${fail} 失败`)
