@@ -18,6 +18,12 @@
  * 纯执行层，不 import 任何 mineflayer 依赖（`tools/check-mc-boat.mjs` 用假 bot 直接跑）。
  */
 
+import vec3pkg from 'vec3'
+import { placeEntityItem } from './place.mjs'
+import { inWaterNow } from './world-observer.mjs'
+
+const Vec3 = vec3pkg
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)))
 
 /** 水上那种载具（船 / 木筏）：旱地上几乎飘不动，报错时要区别对待。 */
@@ -325,8 +331,12 @@ export async function dismountVehicle (self, { wait = 1_500 } = {}, ctx = {}) {
     done = true
   }
   const p = b.entity?.position
+  /* 🔴 2026-10-24 实机（用户：下船后基本走不了、走得很慢）：船停在水面上，下船的人往往直接泡进水里。
+   *    在水里移动本来就慢（游泳约 1.5 格/秒，只有走路的三分之一），而 AI 不知道"我现在在水里"，
+   *    只会觉得"寻路卡了"反复重叫。这里如实报出来。 */
+  const wet = (() => { try { return inWaterNow(b) } catch { return false } })()
   return {
-    ok: done, vehicle: name, ms: Date.now() - t0,
+    ok: done, vehicle: name, ms: Date.now() - t0, inWater: wet,
     position: p ? { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) } : null,
     tried: ghost ? ['command', 'sneak', 'dismount', 'attack'] : ['sneak', 'dismount', 'attack', 'command'],
     ...(ghostCleared
@@ -335,8 +345,139 @@ export async function dismountVehicle (self, { wait = 1_500 } = {}, ctx = {}) {
           : '服务端那边其实早就下来了（车已经不在实体表里），我清掉了本地的"幽灵挂载"。' }
       : {}),
     hint: done
-      ? `从 ${name} 上下来了。`
+      ? `从 ${name} 上下来了。` + (wet
+          ? '⚠️ 你现在**泡在水里** —— 在水里走/游只有走路的三分之一速度（约 1.5 格/秒），别当成"寻路卡了"。想快就先上岸（朝岸边 `mc_move`，或 `mode:"swim"` 上浮换气）；船会留在原地挡路，窄水里可以打掉它（`mc_attack` 打船 / `mc_act {mode:"break"}`）。'
+          : '')
       : `潜行 / 下船包 / 砸船 / \`/ride @s dismount\` 四招都试了，${(budget / 1000).toFixed(1)} 秒内还是没下来 —— `
         + '要么船被方块夹住了（先开离岸边），要么这个服不给发指令（那就人走过去把夹住它的方块挖掉）。',
+  }
+}
+
+/* ─────────── 放船：找水面 → 对准 → 放下 → 上船（2026-10-24） ─────────── */
+
+/** 船能浮的方块（含水面装饰）；判定只看方块名，不碰 mineflayer 类型。
+ *
+ * 🔴 用户 2026-10-24 原话：「现在是能走到水边，但是放不下，没有对着水面，太远或者太近」。
+ *    病根不在"放"这一步（`placeEntityItem` 已经会发 block_place），而在**没选对那一格**：
+ *    AI 给的坐标常常是"水面上面那一格"或者岸边的泥土，于是对着泥土的上表面放船，
+ *    船就落在岸上；或者站得 5 格开外，服务端直接不理。 */
+const WATER_RE = /^(water|bubble_column|kelp|kelp_plant|seagrass|tall_seagrass)$/
+const AIR_RE = /^(air|cave_air|void_air)$/
+export const isWaterName = (n) => WATER_RE.test(String(n ?? ''))
+export const isAirName = (n) => AIR_RE.test(String(n ?? ''))
+
+/**
+ * 找"能放船的水面"，按"开阔度 → 离目标点近 → 离自己 3 格"排序。
+ *
+ * 候选必须同时满足：
+ *   ① 这一格是水（船浮在水面上）
+ *   ② 这一格**上方是空气**（否则船没地方生成）
+ *   ③ 离自己 2.0–4.2 格 —— 太近是"对着自己脚下"（服务端会把船放到身后/拒绝），
+ *      太远超过触及距离（生存 4.5 格，按眼睛到方块中心算）
+ * @returns {Array<{x:number,y:number,z:number,d:number,open:number,dTarget:number}>}
+ */
+export function findBoatSpots (b, { x = null, y = null, z = null, radius = 6, selfMin = 2.0, selfMax = 4.2, limit = 6 } = {}) {
+  const p = b?.entity?.position
+  if (!p) return []
+  const cx = x ?? Math.floor(p.x)
+  const cy = y ?? Math.floor(p.y)
+  const cz = z ?? Math.floor(p.z)
+  const at = (ax, ay, az) => { try { return b.blockAt(new Vec3(ax, ay, az)) } catch { return null } }
+  const out = []
+  for (let dy = -2; dy <= 1; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      for (let dz = -radius; dz <= radius; dz++) {
+        const bx = cx + dx; const by = cy + dy; const bz = cz + dz
+        const blk = at(bx, by, bz)
+        if (!blk || !isWaterName(blk.name)) continue
+        const above = at(bx, by + 1, bz)
+        if (!above || !isAirName(above.name)) continue
+        const d = Math.hypot(bx + 0.5 - p.x, by + 1 - p.y, bz + 0.5 - p.z)
+        if (d < selfMin || d > selfMax) continue
+        let open = 0
+        for (const [ax, az] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nb = at(bx + ax, by, bz + az)
+          if (nb && isWaterName(nb.name)) open++
+        }
+        out.push({
+          x: bx, y: by, z: bz,
+          d: Math.round(d * 100) / 100,
+          open,
+          dTarget: Math.round(Math.hypot(bx + 0.5 - cx, bz + 0.5 - cz) * 100) / 100,
+        })
+      }
+    }
+  }
+  out.sort((a, c) => (c.open - a.open) || (a.dTarget - c.dTarget) || (a.d - c.d))
+  return out.slice(0, limit)
+}
+
+/**
+ * 一步到位放船：找水面 → 视线对准 → 放下 → 复核 → 上船。
+ *
+ * 🔴 为什么要"对着水面"：`block_place` 的落点是服务端按"你点到的方块 + 面"算的。
+ *    对着**空气**发，服务端直接忽略（不报错、也不生成）；对着岸边的泥土，船就落在岸上。
+ *    只有 `lookAt(水格中心)` + `block_place` 这一格水，船才浮在水面。
+ */
+export async function launchBoat (self, { x = null, y = null, z = null, name = null, board = true, radius = 6, budgetMs = 10_000 } = {}, ctx = {}) {
+  const b = self.requireBot()
+  const t = ctx.t ?? ((p) => p)
+  if (vehicleOf(b)) {
+    return { mode: 'boat', placed: true, boarded: true, vehicle: vehicleName(b), hint: '已经在船上了 —— 开船用 mc_move {mode:"boat",x,y,z}' }
+  }
+  const items = (() => { try { return b.inventory.items() } catch { return [] } })()
+  const want = name ? String(name) : (items.find((i) => BOAT_RE.test(String(i.name)))?.name ?? null)
+  if (!want) throw new Error('背包里没有船（oak_boat / oak_raft 之类）—— 先 mc_craft 或 mc_give')
+  const spots = findBoatSpots(b, { x, y, z, radius })
+  if (!spots.length) {
+    return {
+      mode: 'boat', placed: false, name: want,
+      hint: `周围 ${radius} 格里没有"能放船的水面"——要同时满足：这一格是水、**上面是空气**、并且离我 2–4.2 格。`
+        + '常见情况：① 我站在水里（脚下就是水，离得太近）⇒ 先上岸；② 岸边全是荷叶/甘蔗/睡莲挡着上方 ⇒ 换个位置；'
+        + '③ 水面离我超过 4 格 ⇒ 先 mc_move 走到水边。',
+    }
+  }
+  let last = null
+  const tried = []
+  for (const s of spots.slice(0, 3)) {
+    tried.push({ x: s.x, y: s.y, z: s.z, open: s.open, d: s.d })
+    /* ① 视线压到水面上：瞄准水格中心偏上一点（0.6），pitch 自然朝下但不至于对着脚 */
+    try { await t(Promise.resolve(b.lookAt(new Vec3(s.x + 0.5, s.y + 0.6, s.z + 0.5), true)), 'act', '对准水面') } catch {}
+    await sleep(150)
+    /* ② 放（走 placeEntityItem：block_place + use_item 两条路） */
+    let r = null
+    try { r = await placeEntityItem(self, { x: s.x, y: s.y, z: s.z, name: want }, ctx) } catch (e) { r = { placed: false, hint: String(e?.message ?? e) } }
+    last = r
+    if (!r?.placed) continue
+    /* ③ 复核：船下面这一格还是不是水（放到岸上会立刻看出来） */
+    const below = (() => { try { return b.blockAt(new Vec3(s.x, s.y, s.z)) } catch { return null } })()
+    const onWater = isWaterName(below?.name)
+    if (!board) {
+      return { mode: 'boat', placed: true, name: want, at: { x: s.x, y: s.y, z: s.z }, onWater, boarded: false, hint: '上船用 mc_act {mode:"use", who:"<船名>"}，或再调一次 boat（board 默认 true）' }
+    }
+    /* ④ 上船：use 那只船，然后轮询 bot.vehicle（`activateEntity` 只发包不确认） */
+    let boarded = false
+    try {
+      await t(Promise.resolve(self.useBlock({ who: String(r.entity ?? want) })), 'act', '上船')
+      const t0 = Date.now()
+      while (Date.now() - t0 < 2_000) {
+        if (vehicleOf(b)) { boarded = true; break }
+        await sleep(120)
+      }
+    } catch { /* 上不去就如实报：船在，人没上 */ }
+    return {
+      mode: 'boat', placed: true, name: want,
+      at: { x: s.x, y: s.y, z: s.z },
+      entity: r.entity, onWater, boarded,
+      ...(boarded
+        ? { vehicle: vehicleName(b), hint: '在船上了 —— 开船用 mc_move {mode:"boat",x,y,z}（要先给 y）' }
+        : { hint: '船放下了但没上去（2 秒内 bot.vehicle 还是空的）—— 再试 mc_act {mode:"use", who:"' + String(r.entity ?? want) + '"}' }),
+    }
+  }
+  return {
+    mode: 'boat', placed: false, name: want, tried,
+    ...(last?.hint ? { detail: last.hint } : {}),
+    ...(last?.sawInstead ? { sawInstead: last.sawInstead } : {}),
+    hint: '这几个水面点都没放成（已经各试一次，没有对着同一点反复发）—— 换一组水面：mc_move 沿岸走几步再调 boat，或自己 mc_act {mode:"place",name:"' + want + '"} 指定一格水。',
   }
 }

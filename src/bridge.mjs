@@ -28,7 +28,7 @@ import vec3pkg from 'vec3'
 const Vec3 = vec3pkg.Vec3 ?? vec3pkg
 
 import { sleep } from './async-util.mjs'
-import { isAir, isLiquid, canPlaceInto, isSolidBlock } from './block-names.mjs'
+import { isAir, isLiquid, canPlaceInto, isSolidBlock, isTreeBlock } from './block-names.mjs'
 import { pickPlaceItem } from './place-items.mjs'
 import { heldText } from './inventory.mjs'
 
@@ -86,6 +86,22 @@ export function avoidBlockIds (b) {
   return out
 }
 
+/** 所有"树"类方块的 id（叶子 / 原木 / 去皮木 / 菌柄 / 巨型蘑菇）。
+ *
+ * 拿去填 `movements.blocksCantBreak` —— 让 A* 不把"挖穿树"当成一条路（见 `TREE_BLOCK_RE`）。
+ * 拿不到 registry（假 bot / 没连上）就回空数组。
+ */
+export function treeBlockIds (b) {
+  const out = []
+  try {
+    const arr = b?.registry?.blocksArray
+    if (!arr) return out
+    for (const blk of arr) {
+      if (blk && isTreeBlock(blk.name) && typeof blk.id === 'number') out.push(blk.id)
+    }
+  } catch { /* registry 形状不对就当没有 */ }
+  return out
+}
 /** 方向名 → 偏移。中英文都认（模型两种都会写）。 */
 const DIRS = {
   north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0],

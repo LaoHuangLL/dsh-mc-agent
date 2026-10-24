@@ -1292,7 +1292,9 @@ section('⑬ 长路线续行 + 地形局部重估（2026-10-18 审计 P1）')
 {
   const src = readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8')
   ok(/export function routeTrack/.test(src), '续行账本导出（只读，不改路线）')
-  ok(/\{ \.\.\.info, route \}/.test(src), 'walkTo 把 route 挂到结果上')
+  ok(/\{ \.\.\.outInfo, route \}/.test(src), 'walkTo 把 route 挂到结果上')
+  ok(/bMv\.__moveFail/.test(src) && /repeat: n/.test(src), '① 失败去重：同目标同原因连着重试只回一行')
+  ok(/const enRoute = !outInfo\.arrived/.test(src) && /走了 \$\{Math\.round/.test(src), '③ 中途极简：还在路上只报走了几格、还剩几格')
   ok(/let terrain = classifyTerrainCached\(b\)/.test(src) && /terrainReeval \? \{ terrainReeval \}/.test(src),
     '地形重估计数（变了才报）')
   ok(/const fresh = classifyTerrainCached\(b\)[\s\S]{0,400}?terrain = fresh/.test(src),

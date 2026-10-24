@@ -17,6 +17,23 @@ export const isAir = (n) => n === 'air' || n === 'cave_air' || n === 'void_air'
 export const isLiquid = (n) => n === 'water' || n === 'lava' || /_water$|_lava$/.test(String(n ?? ''))
 
 /**
+ * 「水，以及泡在水里的植物」。
+ *
+ * 🔴 2026-10-24 实机（用户：「在水里会被水草挡住」）：
+ *    站在 `seagrass` / `tall_seagrass` / `kelp` 那格里时，物理上明明泡在水里，但
+ *    ① `bot.entity.isInWater` 只认**真正的液体方块**（seagrass 不算）⇒ 读成 false；
+ *    ② 眼高格、脚格读出来的名字都是 `seagrass`，不是 `water`。
+ *    于是 `inWaterNow()` 三条判据全不成立 ⇒ 被当成"站在陆地上"：
+ *    swim 分支不触发（改走 pathfinder，而 A* 在水里出不了路）、`recoverFromWater` 也找不到水面。
+ *    表现就是"被水草挡住、动不了"。
+ *
+ * ⚠️ 不要直接放宽 `isLiquid`：它还兼着"会不会淹死/能不能站"的语义，
+ *    岩浆和流动水都在里面，改它会波及挖掘、搭桥、渲染一大片。这里只新增一个更窄的判定。
+ */
+export const WATER_LIKE_RE = /^(water|flowing_water|bubble_column|seagrass|tall_seagrass|kelp|kelp_plant)$/
+export const isWaterLike = (n) => WATER_LIKE_RE.test(String(n ?? ''))
+
+/**
  * 能"穿过去"的小东西（花草火把之类）—— 洞穴层图里**不算墙**（否则一张图全是 `#`）。
  * 注意：树叶**不在**这里（它挡视线、也算地形），但在 `SOFT_ROOF` 里（头顶有树不算"在地下"）。
  */
@@ -55,6 +72,26 @@ export const NON_SUFFOCATING = /_(?:door|trapdoor|fence_gate|bed|slab|stairs)$|^
  */
 export const PLANT_PASSABLE = /^(?:wheat|carrots|potatoes|beetroots|torchflower_crop|pitcher_crop|nether_wart|sugar_cane|kelp|kelp_plant|seagrass|tall_seagrass|cocoa|bamboo|bamboo_sapling|short_grass|tall_grass|fern|large_fern|dead_bush|lily_pad|vine|glow_lichen|hanging_roots|crimson_roots|warped_roots|nether_sprouts|big_dripleaf|small_dripleaf)$/
 
+/**
+ * "树"这一整类：叶子 / 原木 / 去皮木 / 下界菌柄 / 巨型蘑菇。
+ *
+ * 🔴 2026-10-24 用户实机：「现在寻路老是会跑到树上」。根因不在我们这层，在 vendor：
+ *    `movements.js:233` 里 `b.safe = (boundingBox === 'empty' || climbable || carpets) && !blocksToAvoid`，
+ *    树叶/原木的 `boundingBox` 是 `block` ⇒ `safe = false` ⇒ A* 认为"这格不能站"；
+ *    紧接着 `safeOrBreak`（:282）说"不能站没关系，能挖开就行"，代价
+ *    `(1 + 3*digTime/1000) * digCost` —— 树叶 digTime 约 0.05–0.3 秒、digCost 默认 4，
+ *    算下来约 4.6–7.6；而绕开一棵树通常只多走 2–3 步。于是 A* 认定**挖穿树冠比绕树便宜**，
+ *    一路挖着树叶往上爬，人就站在树冠高度了。
+ *
+ * 修法：把这一整类塞进 `mv.blocksCantBreak`（vendor :41 那个 Set）⇒ `safeToBreak()` 返回 false
+ * ⇒ `safeOrBreak()` 返回 100（不可行）⇒ A* 根本不规划穿树。
+ *
+ * ⚠️ **只用于寻路的"别挖它"**，不是"这方块不能挖" —— `mc_dig {name:"oak_log"}` 砍树照样能砍，
+ *    那条路不走 A*。所以别拿它去卡 `diggableBlock`。
+ * ⚠️ 竹子不算：它在 `PLANT_PASSABLE` 里，能直接穿过去。木板/木棍也不算（`_planks` / `_stairs`）。
+ */
+export const TREE_BLOCK_RE = /_leaves$|_log$|_wood$|_hyphae$|^(crimson|warped)_stem$|^(brown|red)_mushroom_block$|^mushroom_stem$/
+export const isTreeBlock = (n) => Boolean(n) && TREE_BLOCK_RE.test(String(n))
 export const SOFT_ROOF = /_leaves$|_log$|_wood$|^bamboo|^snow|_snow$|cactus|^moss|^melon|^pumpkin|_sapling$|_flower$|^vine$|glow_lichen|^hanging_roots$|^big_dripleaf/
 
 /**

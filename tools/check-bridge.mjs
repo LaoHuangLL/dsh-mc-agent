@@ -460,7 +460,7 @@ section('⑨ avoidBlockIds：把"要命方块"交给寻路器绕开')
     && !BRIDGE_FATAL.test('sweet_berry_bush'), '正则仍由那份名单生成（唯一出处）；甜浆果丛只减速、不算致命')
 
   const plugins = read('../src/plugins.mjs')
-  ok(/import \{ avoidBlockIds \} from '\.\/bridge\.mjs'/.test(plugins), 'plugins.mjs 引了 avoidBlockIds')
+  ok(/import \{ avoidBlockIds, treeBlockIds \} from '\.\/bridge\.mjs'/.test(plugins), 'plugins.mjs 引了 avoidBlockIds')
   ok(/for \(const id of avoidBlockIds\(b\)\) mv\.blocksToAvoid\.add\(id\)/.test(plugins), '🔴 movements() 里真把它们加进 blocksToAvoid')
 }
 

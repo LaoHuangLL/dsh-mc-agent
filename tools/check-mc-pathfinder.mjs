@@ -84,6 +84,35 @@ ok(/from '\.\/plugins\.mjs'/.test(coreSrc), 'core.mjs 确实从 plugins.mjs 取�
 ok(/const doorHere = Boolean\(b && typeof b\.name === 'string'/.test(indexSrc) && /const doorHere[\s\S]{0,400}?curPoint\.y = Math\.floor\(curPoint\.y\)/.test(indexSrc),
   'index.js 的 postProcessPath 认门（门格瞄格心，不抬到门顶上）')
 
+/* 🔴 2026-10-24 用户实机：「正在垫方块往上爬，悬空超过 3 秒才掉下来」。
+ *    根因在 vendor `index.js` 的 placing 分支：
+ *      ① 垫柱时先 `setControlState("jump", true)` 再判断够不够高，达不到就 `return` ——
+ *         而这条 return 在 3500ms 卡住检测**之前**，于是永远轮不到超时恢复，jump 一直按着；
+ *      ② 装备失败 `.catch(_ignoreError => {})` 什么都不做 ⇒ `lockEquipItem` 永不释放、
+ *         `placing` 永远为 true ⇒ 每 tick 都在 `tryAcquire` 处 return，永久卡死。 */
+ok(/let placingStartedAt = 0/.test(indexSrc) && /resetPath\('place_jump_timeout'\)/.test(indexSrc),
+  '垫柱跳跃有专用超时：达不到放置高度时松开 jump 并结束这条路径（不再绕过 3500ms 卡住检测）')
+ok(/resetPath\('equip_error'\)/.test(indexSrc),
+  '装备失败会释放锁并结束这条路径（不再永久卡在 placing 状态）')
+
+/* 🔴 2026-10-24 寻路通审（用户：「完全卡住，tp 也不行，最后重进才好」）：
+ *    挖掘分支的 `return` 同样排在 3500ms 卡住检测**之前**，而 `digging` 只靠
+ *    diggingAborted/diggingCompleted 事件复位 —— 服务端不回包时这两个事件永远不来，
+ *    `digging` 就永远是 true，之后**每一次移动**都在挖掘分支 return ⇒ 永久卡死。 */
+ok(/let digStartedAt = 0/.test(indexSrc) && /resetPath\('dig_timeout'\)/.test(indexSrc),
+  '挖掘分支有超时（digTimeout）：服务端不回包时不会永久粘在 digging=true')
+ok(/if \(digging\) \{[\s\S]{0,400}?digging = false/.test(indexSrc),
+  'resetPath 直接把 digging 复位，不再只靠事件（事件可能永远不来）')
+ok(/resetPath\('dig_equip_error'\)/.test(indexSrc),
+  '挖前装备失败就结束这条路径，而不是拿错工具硬挖')
+ok(/resetPath\('use_block_error'\)/.test(indexSrc),
+  '开门/按按钮失败会结束这条路径（不再无限重试同一扇门）')
+ok(/!movements\.emptyBlocks\.has\(b\.type\)/.test(indexSrc),
+  '起点 +1 偏移用传入的 movements 判断（不是全局 stateMovements）')
+const gotoSrc = existsSync(join(PF_DIR, 'lib', 'goto.js')) ? readFileSync(join(PF_DIR, 'lib', 'goto.js'), 'utf8') : ''
+ok(/status === 'noPath'\)[\s\S]{0,300}?path\.length === 0\)/.test(gotoSrc),
+  'goto.js 先判 noPath 再判空路径（「无路可走」不再被当成「到了」）')
+
 // ── 假世界：一小片地板 + 那个 1 格台阶 + 一块半砖 + 一条 1 格宽走廊 ────────────────
 const FULL = [[0, 0, 0, 1, 1, 1]]
 const grid = new Map()
@@ -257,6 +286,7 @@ section('6. mc_move 的 noDig / walk-nodig：走路一格都不挖')
  *   `canDig` 关掉、并且不许走"卡住就挖开台阶"那条补救）。
  * 这里做**契约检查**（各自该有的那一句必须在），不重跑寻路 —— 真行为由实机验证。 */
 const mcIndexSrc = readFileSync(join(HERE, '..', 'index.js'), 'utf8')
+const patchSrc = readFileSync(new URL('./patch-mc-deps.mjs', import.meta.url), 'utf8')
 const mvSrc = readFileSync(join(HERE, '..', 'src', 'movement.mjs'), 'utf8')
 const countOf = (hay, needle) => hay.split(needle).length - 1
 
@@ -278,6 +308,35 @@ ok(/const carveAllowed = !noDig &&/.test(mvSrc), '卡住时"挖开台阶"的补�
  *   实机撞到过两次「同一目标第一次秒返回、第二次才走」。只重试这一个 reason，且要有剩余预算。 */
 ok(/info\.reason === 'goal-reached-elsewhere'/.test(mvSrc) && /retriedElsewhere: true/.test(mvSrc),
   'walkTo 对 goal-reached-elsewhere 自动重试一次（不靠 AI 手动再叫）')
+
+/* 🔴 2026-10-24 用户实机：「现在寻路老是会跑到树上」。
+ *    vendor `movements.js:233` 的 `b.safe` 对树叶/原木是 false（boundingBox 是 block），
+ *    而 `safeOrBreak`（:282）认为"不能站但能挖开就行"，挖树叶的 laborCost 约 4.6–7.6、
+ *    比绕树（2–3 步）便宜 ⇒ A* 一路挖着树冠往上爬。
+ *    修法：把树这一类塞进 `blocksCantBreak`（vendor :41），`safeToBreak()` 就会返回 false。 */
+const bnSrc = readFileSync(join(HERE, '..', 'src', 'block-names.mjs'), 'utf8')
+const treePlugSrc = readFileSync(join(HERE, '..', 'src', 'plugins.mjs'), 'utf8')
+const brSrc = readFileSync(join(HERE, '..', 'src', 'bridge.mjs'), 'utf8')
+ok(/export const TREE_BLOCK_RE =/.test(bnSrc) && /export const isTreeBlock =/.test(bnSrc),
+  'block-names 有 TREE_BLOCK_RE / isTreeBlock（树这一类）')
+ok(/export function treeBlockIds \(b\)/.test(brSrc), 'bridge 有 treeBlockIds（拿 registry 里所有树的 id）')
+ok(/for \(const id of treeBlockIds\(b\)\) mv\.blocksCantBreak\.add\(id\)/.test(treePlugSrc),
+  '树被塞进 blocksCantBreak —— A* 不再把「挖穿树」当成一条路')
+ok(/const diggable = \(blk\) => diggableBlock\(blk\) && !isTreeBlock\(nameOf\(blk\)\)/.test(mvSrc),
+  '补挖（carveStepAhead）也不挖树 —— 我们自己那条腿同样不能爬树')
+ok(/isTreeBlock\(blockedAhead\.name\)/.test(mvSrc), '挡路的是树时，提示明说「别挖树」')
+
+ok(/if \(b\?\.vehicle && e === b\.vehicle\) continue/.test(mvSrc),
+  '实体挡路检查排除了**自己骑的船**（不再把船报成挡路）')
+ok(/自己骑的载具不算障碍/.test(patchSrc),
+  'patch-mc-deps 里有「自己骑的载具不算障碍」补丁')
+ok(/this\.bot\.vehicle && ent === this\.bot\.vehicle/.test(patchSrc),
+  '补丁内容就是跳过 bot.vehicle')
+
+ok(/!blockC\.physical && !blockC\.liquid/.test(patchSrc),
+  '水里不垫方块：jumpUp 目标格是水时不规划放方块')
+ok(/!blockD\.physical && !blockD\.liquid/.test(patchSrc),
+  '水里不垫方块：脚下那格是水时也不规划放方块')
 
 console.log(`\n${fail === 0 ? '✓ 全部通过' : '✗ 有失败项'}：pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)

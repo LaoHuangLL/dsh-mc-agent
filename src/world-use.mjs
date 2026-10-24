@@ -27,6 +27,10 @@ import { sleep, waitUntil } from './async-util.mjs'
  *    拆分时（第二十/二十七刀）漏掉的。 */
 import { callBudget } from './budget.mjs'
 import { aimAt } from './camera.mjs'
+/* 2026-10-24：`look` 的跟踪 / 采样 / 等新实体（末影之眼指路、看箭飞、看船漂）。
+ * 单独一层的原因见 `src/look-track.mjs` 头注释：`camera.lookAt()` 是"转一次头"，
+ * 答不了"它往哪个方向飞 / 还在动吗 / 我刚扔的东西生成在哪"。 */
+import { lookTrack } from './look-track.mjs'
 import { CONTAINER_RE, TOGGLE_RE, cropStageOf, isEntityItem } from './block-names.mjs'
 import { entityNameOf, pickEntity } from './entity-names.mjs'
 import { heldText, equipDestOf, durabilityOf } from './inventory.mjs'
@@ -308,7 +312,22 @@ export async function useItem (b, { hold = 0, x, y, z } = {}, ctx = {}) {
 /** 统一交互入口：mode = look / place / break / toward */
 export async function interact (self, args = {}) {
   const mode = String(args.mode ?? 'look')
-  if (mode === 'look') return { mode, ...(await self.lookAt(args)) }
+  if (mode === 'look') {
+    /* 2026-10-24：带 newEntity / track / samples / useItem 时走跟踪层；
+     * 都不给就还是原来的一次性转头（行为一字未变）。 */
+    if (args.newEntity || args.track || args.samples || args.useItem) {
+      return {
+        mode,
+        ...(await lookTrack(self.requireBot(), args, {
+          /* 先快照再"扔" —— 顺序由 lookTrack 保证（它拍完快照才调这个回调） */
+          useItem: args.useItem ? () => self.useItem({ hold: args.hold }) : null,
+          /* 代次：被 mc_move / 战斗接管就收手，别在别人掌权时继续改朝向 */
+          moveGenOf: () => self._moveGen,
+        })),
+      }
+    }
+    return { mode, ...(await self.lookAt(args)) }
+  }
   if (mode === 'place') return { mode, ...(await self.placeBlock(args)) }
   if (mode === 'break') return { mode, ...(await self.breakBlock(args)) }
   if (mode === 'toward') {

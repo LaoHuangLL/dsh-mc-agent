@@ -22,6 +22,7 @@
  *
  * 用法：node tools/check-mc-boat.mjs
  */
+import { readFileSync } from 'node:fs'
 const { driveBoat, dismountVehicle, vehicleOf, vehicleName, isWaterVehicle } = await import(new URL('../src/boat.mjs', import.meta.url))
 
 let pass = 0
@@ -203,6 +204,14 @@ console.log('\n⑦ 船 / 矿车 / 坐骑都认')
   ok(isWaterVehicle({ vehicle: { name: 'minecart' } }) === false, '矿车不是水上载具（旱地也能走）')
   ok(vehicleName({ vehicle: { name: 'minecart' } }) === 'minecart', 'vehicleName 取得到名字')
   ok(vehicleOf({}) === null, '没骑东西 ⇒ vehicleOf 返回 null')
+}
+
+console.log('\n⑧ 下船后如实报「泡在水里」')
+{
+  const src = readFileSync(new URL('../src/boat.mjs', import.meta.url), 'utf8')
+  ok(/inWater: wet/.test(src), '下船结果里有 inWater 字段')
+  ok(/泡在水里/.test(src), '在水里时提示「泡在水里」')
+  ok(/三分之一速度/.test(src), '并说明水里只有走路的三分之一速度')
 }
 
 console.log(`\n${fail === 0 ? '✅ 全部通过' : '❌ 有失败'}：pass=${pass} fail=${fail}`)

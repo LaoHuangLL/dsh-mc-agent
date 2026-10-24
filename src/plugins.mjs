@@ -18,10 +18,11 @@ import Vec3 from 'vec3'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { resolveHarnessHome } from './format.mjs'
+import { withTimeout } from './async-util.mjs'
 import { scaffoldingItemIds } from './place-items.mjs'
 import { patchDigTime } from './dig-speed.mjs'
 import { applyProfile, classifyTerrainCached, profileFor } from './terrain.mjs'
-import { avoidBlockIds } from './bridge.mjs'
+import { avoidBlockIds, treeBlockIds } from './bridge.mjs'
 import { PLANT_PASSABLE } from './block-names.mjs'
 /* 门的判断/去重/冷却只有一份（`src/movement.mjs`）：上半格可能没有 `open` 属性，
  * 必须统一下半块判断；两处各写一份就会各按一次（踩坑 #175/#176）。 */
@@ -336,7 +337,9 @@ export function guardDoorDig (b, { log = null } = {}) {
       inFlight.add(key)
       pressAt.set(key, Date.now())          // await 之前就上锁（tick 会重入）
       try {
-        await b.activateBlock(target)
+        /* 🔴 2026-10-24 全量体检：`activateBlock` 要等服务端回包才 resolve，回包丢了就永久挂住
+         * —— 这里挂住会让 `inFlight` 里那扇门**永远占着锁**（之后再也不按它）。给个上限。 */
+        await withTimeout(b.activateBlock(target), 1500, '开门')
         if (b.__autoOpenedDoors instanceof Map) b.__autoOpenedDoors.set(key, Date.now())
         b.__doorOpens = (b.__doorOpens ?? 0) + 1
         say(`🚪 寻路请求开门 ${nm}，不挖门（${key}）`)
@@ -735,6 +738,13 @@ export function movements (self, { terrain = null } = {}) {
    * （`movements.js:233` 的 `b.safe`），上游只放了 fire/cobweb/web/lava ——
    * 把仙人掌 / 细雪 / 甜浆果丛 / 岩浆块 / 营火补上，A* 会主动绕开。 */
   for (const id of avoidBlockIds(b)) mv.blocksToAvoid.add(id)
+  /* 🔴 2026-10-24 用户实机：「现在寻路老是会跑到树上」。
+   *    `blocksToAvoid` 治不了这个 —— 它只管"这格能不能站"，而树叶/原木的 `boundingBox`
+   *    本来就是 `block`（`safe` 已经是 false）；真正的病是 `safeOrBreak` 认为"不能站但能挖开"，
+   *    而挖树叶的 laborCost（约 4.6–7.6）比绕树（2–3 步）便宜 ⇒ A* 一路挖着树冠往上爬。
+   *    塞进 `blocksCantBreak` 之后 `safeToBreak()` 返回 false ⇒ 那条 move 记 100（不可行）。
+   *    ⚠️ 只影响**寻路**；`mc_dig` 砍树不走 A*，照旧能砍。 */
+  for (const id of treeBlockIds(b)) mv.blocksCantBreak.add(id)
   /* 🔴 2026-10-23（二档，移植自 mindcraft / baritone 的同一个坑）：
    *    `avoidBlockIds()` 里含 `lava` ⇒ 一旦人**真掉进岩浆**，A* 眼里四面八方全是
    *    "不能站"，就再也规划不出"游出去"的路（只剩原地跳的 Escape）。

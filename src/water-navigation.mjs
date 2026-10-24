@@ -22,7 +22,7 @@
  */
 
 import { Vec3 } from 'vec3'
-import { isAir, isLiquid, isPassable, isSolidBlock } from './block-names.mjs'
+import { isAir, isLiquid, isPassable, isSolidBlock, isWaterLike } from './block-names.mjs'
 import { BRIDGE_FATAL, fatalText } from './bridge.mjs'
 
 /* ─────────── 常量 ─────────── */
@@ -71,7 +71,9 @@ export function cellKindAt (b, x, y, z) {
   const n = nameAt(b, x, y, z)
   if (n == null) return 'unknown'
   if (BRIDGE_FATAL.test(n)) return 'blocked'          // 岩浆/火/仙人掌…：不是"能站"，是"别去"
-  if (isLiquid(n)) return 'water'
+  /* 🔴 2026-10-24 实机（用户：「在水里会被水草挡住」）：海草/海带那格原来被判成 `blocked`（是墙）
+   * ⇒ 出口搜索把整片水草当墙壁，人在海草里就"找不到任何出口"。水里植物就是水。 */
+  if (isWaterLike(n) || isLiquid(n)) return 'water'
   if (isAir(n) || isPassable(n)) return 'air'
   return 'blocked'
 }

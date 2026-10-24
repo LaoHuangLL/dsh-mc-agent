@@ -309,7 +309,9 @@ const buildSrc = stripComments(await (await import('node:fs/promises')).readFile
   const mineSrc = stripComments(await (await import('node:fs/promises')).readFile(new URL('../src/mining.mjs', import.meta.url), 'utf8'))
   ok(/export async function breakBlock \(self, \{ x, y, z, allowDangerous = false \} = \{\}, ctx = \{\}\) \{/.test(mineSrc), 'mining 有 breakBlock（带脚下安全检查开关）')
   ok(/await ctx\.equipFor\(b, blk, `换工具挖 \$\{name\}`\)/.test(mineSrc), 'breakBlock 动手前调 equipFor（实现在 src\\mining.mjs）')
-  ok(/if \(!canHarvestNow\(b, blk\)\) \{/.test(mineSrc), 'breakBlock 换不上就拒绝（不硬挖）')
+  ok(/const noDrop = !canHarvestNow\(b, blk\)/.test(mineSrc) && /if \(noDrop && !canBreakNow\(b, blk\)\) \{/.test(mineSrc),
+    'breakBlock 换不上就拒绝（不硬挖）')
+  ok(/canBreakNow/.test(invSrc), 'inventory 有 canBreakNow（"挖得动"与"有掉落"分开判）')
   ok(/硬挖会一直超时/.test(mineSrc), '拒绝文案写清"硬挖会一直超时"')
   ok(/const digMs = digMsFor\(b, blk/.test(mineSrc), 'breakBlock 用 digMsFor 算"这块要几秒"')
   ok(/export function digMsFor \(b, blk, itemType = null\)/.test(dsSrc) && /typeof blk\?\.digTime !== 'function'/.test(dsSrc),

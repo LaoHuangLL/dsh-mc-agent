@@ -215,6 +215,45 @@ export function invUsed (b, snap) {
 }
 
 /** 手上这叠现在能不能挖这块方块（`harvestTools` = {物品id:true}；没这项 = 徒手就行） */
+/** 手上这套东西**挖掉**它要多久（毫秒）。和 `canHarvestNow` 是两件事：
+ *
+ *  `harvestTools` 管的是**掉不掉东西**，不是**挖不挖得动**。
+ *  雪块（`snow_block`）hardness 只有 0.2 —— 徒手 0.3 秒就挖开，但只有锹才掉雪球。
+ *  2026-10-24 用户实机：要挖穿头顶的雪块爬出竖井，报"需要锹，背包里也没有" ⇒ 以为挖不动，
+ *  结果反复超时；再想去做锹，木头又在地表、地表正被雪盖着 ⇒ 死循环。
+ *
+ *  所以"挖开挡路的东西"看这个函数，"收获资源"才看 `canHarvestNow`。
+ *  返回 `null` = 算不出来（旧数据 / 假 bot）。
+ */
+export function breakMsNow (b, blk) {
+  const held = b?.heldItem?.type ?? null
+  try {
+    const t = Number(blk?.digTime?.(held))
+    if (Number.isFinite(t) && t > 0) return t
+  } catch {}
+  try {
+    const t = Number(blk?.digTime?.(null))
+    if (Number.isFinite(t) && t > 0) return t
+  } catch {}
+  // 退路：按硬度估（徒手约 hardness × 1500ms）
+  const h = Number(blk?.hardness)
+  if (Number.isFinite(h) && h >= 0) return h <= 0 ? 50 : h * 1500
+  return null
+}
+
+/** 徒手/手上这套能在多久之内挖掉就算"挖得动"。3 秒 ≈ 泥土 0.75s、雪块 0.3s、沙子 0.75s；
+ *  石头徒手 7.5s、深板岩 25s ⇒ 判为挖不动，别硬挖（一次调用才 10 秒，硬挖必超时）。 */
+export const BREAK_OK_MS = 3_000
+
+/** 手上这套挖得动它吗（不管掉不掉东西）。`limitMs` 可调，默认 `BREAK_OK_MS`。 */
+export function canBreakNow (b, blk, limitMs = BREAK_OK_MS) {
+  if (b?.game?.gameMode === 'creative') return true
+  const ms = breakMsNow(b, blk)
+  /* 算不出时间（旧数据 / 假 bot / 方块没有硬度）⇒ 退回老口径：**本来就能收获才放行**。
+   * 反过来（一律放行）会把"石头 + 空手"也放过去，那就是白挖 7.5 秒再报个假原因。 */
+  if (ms == null) return canHarvestNow(b, blk)
+  return ms <= limitMs
+}
 export function canHarvestNow (b, blk) {
   if (b?.game?.gameMode === 'creative') return true
   const need = Object.keys(blk?.harvestTools ?? {})

@@ -74,6 +74,8 @@ import { statusPing, parseAddress, formatAddress, flattenMotd } from './src/ping
 import { ServerHistory } from './src/serverhistory.mjs'
 import { buildConnectPrompt } from './src/connect-prompt.mjs'
 import { waitForEvents } from './src/wait.mjs'
+import { launchBoat } from './src/boat.mjs'
+import { lookTrack } from './src/look-track.mjs'
 
 export const name = 'dsh-mc-agent'
 export const inject = ['webServer', 'tools']
@@ -3919,7 +3921,7 @@ export function apply(ctx, rawConfig) {
     /* 🔴 2026-10-20 审计（用户："减少 token 消耗"）：每行只留"这个 mode 干什么 + 影响决策的行为"，
      *    参数细节交给下面那张参数表 —— 原来每个 mode 后面都跟着一长串解释，673 字里有近一半是重复的。 */
     description: '与游戏世界互动（**优先用它，别用服务器指令**）。mode：\n'
-      + '· look 看向坐标或玩家(who)\n'
+      + '· look 看向坐标或玩家(who)；要看方向/速度就加 track:1500 + samples（末影之眼指路）\n'
       + '· toward 看向并走近某个玩家(who)\n'
       + '· place 放方块 (x,y,z)；悬空先垫脚（=搭高）\n'
       + '· bridge 搭路：朝 (x,y,z) 铺脚下一层；脚下悬空/区块没加载/血量<8 就停，岩浆与深空只警告\n'
@@ -3932,6 +3934,8 @@ export function apply(ctx, rawConfig) {
       + '· sleep 睡最近的床（夜里或雷雨才行；白天会直接告诉你别白跑）\n'
       + '· wake 起床（躺着时才有用）\n'
       + '· farm 耕地+播种（给 x/y/z 就那一格，不给就在周围找土；上面熟了的先收）\n'
+      + '· boat 放船并坐上去：自动找周围 2–4 格内**能放船的水面**（水 + 上方空气），视线对准水面再放，\n'
+      + '  放下后复核船底下是不是水，默认接着上船（board:false 只放不上）。给 x/y/z 就在那附近找水面\n'
       + '· dismount 从船/矿车/坐骑上下来（开船用 mc_move boat）',
     parameters: {
       mode: { type: 'string', description: '见上面各 mode（默认 look）' },
@@ -3949,6 +3953,11 @@ export function apply(ctx, rawConfig) {
       clear: { type: 'boolean', description: 'farm：上面有杂物先挖掉（默认 false，只跳过并报出来）' },
       radius: { type: 'number', description: 'sleep 找床 / farm 找地的范围（sleep 默认 32 上限 64；farm 默认 4 上限 8）' },
       waitMs: { type: 'number', description: 'sleep：躺上后最多等多久醒（默认 8000，上限 20000）' },
+      board: { type: 'boolean', description: 'boat：放下后要不要直接坐上去（默认 true）' },
+      newEntity: { type: 'number', description: 'look：从现在起多少毫秒内**新出现**的实体（扔眼睛/珍珠才生成；默认 0=不等）' },
+      track: { type: 'number', description: 'look：跟踪多少毫秒（边跟边采样；默认 0=只转一次头）' },
+      samples: { type: 'string', description: 'look+track：summary（默认，只报方向/速度/位移）/ raw（另附原始点序列）' },
+      useItem: { type: 'boolean', description: 'look：等新实体前先用手上的东西（扔眼睛）—— 比先 useitem 再 look 更准，中间不漏' },
     },
     output: text(undefined, (a, v) => String(v?.text ?? compactJson(v))),
     timeoutMs: CALL_MS + 1_000,
@@ -3961,7 +3970,17 @@ export function apply(ctx, rawConfig) {
          *    但人在 mc_act 里找它（脱困 / 爬台阶时手最顺的就是这个工具）。与其报错让人换工具，
          *    直接把 jump 接过来 —— 和 mc_move {mode:"jump"} 走同一条路（同一个 bumpGen）。 */
         case 'jump':    return withOutcome({ mode, ...(await bot.jump()) }, { ...aroundOf(sess) })
-        case 'look':    return withOutcome({ mode, ...(await bot.lookAt(args)) })
+        case 'look': {
+          /* 2026-10-24：带 newEntity / track / samples / useItem 时走跟踪层（src/look-track.mjs）。
+           * 都不给 = 原来的一次性转头，行为一字未变。 */
+          if (args.newEntity || args.track || args.samples || args.useItem) {
+            return withOutcome({ mode, ...(await lookTrack(bot.requireBot(), args, {
+              useItem: args.useItem ? () => bot.useItem({ hold: args.hold }) : null,
+              moveGenOf: () => bot._moveGen,
+            })) })
+          }
+          return withOutcome({ mode, ...(await bot.lookAt(args)) })
+        }
         case 'toward':  return withOutcome({ mode, ...(await bot.interact(args)) })
         case 'place':   return withOutcome({ mode, ...(await bot.placeBlock(args)) }, { expect: 'placed' })
         /* P0-2（用户 m02868）：搭路是**独立状态机** —— 每格"放一块 → 等服务端确认 → 才走"，任何一处
@@ -3986,8 +4005,11 @@ export function apply(ctx, rawConfig) {
         case 'sleep':   return withOutcome({ mode, ...(await sleepInBed(bot, { x: args.x, y: args.y, z: args.z, radius: args.radius, waitMs: args.waitMs, budgetMs: args.budgetMs })) })
         case 'wake':    return withOutcome({ mode, ...(await wakeUp(bot)) })
         case 'farm':    return withOutcome({ mode, ...(await farmArea(bot, { x: args.x, y: args.y, z: args.z, seed: args.seed, harvest: args.harvest, clear: args.clear, radius: args.radius, count: args.count })) })
+        /* 2026-10-24 用户：「能走到水边，但是放不下，没有对着水面，太远或者太近」—— 放船真正的难点是**选哪一格**，
+         * 不是发不发包。所以这里一步做完：找水面 → 视线对准 → 放 → 复核船底下是水 → 上船；失败自动换下一个水面点。 */
+        case 'boat':    return withOutcome({ mode, ...(await launchBoat(bot, { x: args.x, y: args.y, z: args.z, name: args.name, board: args.board, radius: args.radius })) }, { expect: 'placed' })
         case 'dismount': return withOutcome({ mode, ...(await bot.dismountVehicle()) })
-        default: throw new Error(`未知 mode："${mode}"（可用 look/toward/place/bridge/break/use/useitem/fish/equip/toss/jump/sleep/wake/farm/dismount；走路/飞/游泳用 mc_move，射箭/打怪/自查/方块台另见 mc_shoot / mc_attack / mc_prep / mc_station）`)
+        default: throw new Error(`未知 mode："${mode}"（可用 look/toward/place/bridge/break/use/useitem/fish/equip/toss/jump/sleep/wake/farm/boat/dismount；走路/飞/游泳用 mc_move，射箭/打怪/自查/方块台另见 mc_shoot / mc_attack / mc_prep / mc_station）`)
       }
     },
   }))

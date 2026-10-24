@@ -20,8 +20,8 @@ const Vec3 = vec3pkg.Vec3 ?? vec3pkg
 import { callBudget, callSecText, budgetSecText, CALL_BUDGET_MS } from './budget.mjs'
 import { inWaterNow } from './world-observer.mjs'
 import { connectionStale } from './connection.mjs'
-import { heldText, invSnap, invUsed } from './inventory.mjs'
-import { isAir, isLiquid, isPassable, isSolidBlock } from './block-names.mjs'
+import { heldText, invSnap, invUsed, canBreakNow, breakMsNow, toolKinds } from './inventory.mjs'
+import { isAir, isLiquid, isPassable, isSolidBlock, isTreeBlock, isWaterLike } from './block-names.mjs'
 import { BRIDGE_FATAL, heldSnapshotOf, restoreHeldOf } from './bridge.mjs'
 import { classifyTerrainCached } from './terrain.mjs'
 import { recoverFromWater } from './water-recovery.mjs'
@@ -467,7 +467,8 @@ export async function walkSwim (self, target, { arrive = 1.6, budget = self.cfg.
        * 高度差 ≤ 0.6 格就算真到了。 */
       if (left <= arrive) {
         let goalIsWater = false
-        try { goalIsWater = isLiquid(b.blockAt(new Vec3(goal.x, goal.y, goal.z))?.name) } catch { /* 读不到就按干地算 */ }
+        /* 🔴 2026-10-24：目标格是海草/海带也算"游到水里"（原来只认 isLiquid ⇒ 目标在水草里永远到不了）。 */
+        try { goalIsWater = isWaterLike(b.blockAt(new Vec3(goal.x, goal.y, goal.z))?.name) || isLiquid(b.blockAt(new Vec3(goal.x, goal.y, goal.z))?.name) } catch { /* 读不到就按干地算 */ }
         const dyGoal = Math.abs(Number(me.y) - Number(goal.y))
         if (!inWaterNow(b) || goalIsWater || dyGoal <= 0.6) {
           return { arrived: true, position: at(me), ms: Date.now() - t0, moved, via: 'swim', remaining: r2(left) }
@@ -751,9 +752,74 @@ async function walkToUnguarded (self, target, { arrive = 1.6, budget = self.cfg.
       hint: `${info.hint ? info.hint + ' ' : ''}这条路还剩约 ${blocks} 格，按一次 10 秒（约 43 格）算**大约还要 ${estCalls} 次调用** —— 同参数接着叫就行，别换目标点。`,
     }
   }
-  const route = routeTrack(self, target, info)
-  if (!route?.stalled) return { ...info, route }
-  return { ...info, route, hint: `${info.hint ? info.hint + '\n' : ''}${route.hint}` }
+  /* ================= 2026-10-24 用户点单：① 失败去重 + ③ 中途返回极简 =================
+   *
+   * 用户实机（m06771）：「我卡在丘陵。继续走。」—— 1800 格的目标，一次 10 秒约 43 格，
+   * 要走 40 多次。每次调用都往上下文里灌一整条结果（hint / planTried / around / above /
+   * shaft / blockedAhead…），走一趟就吃掉 8~10K token，而且绝大多数是"还没到、接着走"的废话；
+   * 卡住时更糟：同一个原因重复三次，就把同一段话抄三遍。
+   *
+   * ① 失败去重：同目标 + 同原因（含眼前挡路那块）连续出现 ⇒ 第二次起只回一行，
+   *    并把 repeat 次数报出来。换目标 / 换原因 / 到达 ⇒ 计数清零。
+   * ③ 中途极简：**有进展、没卡住**（还在路上）时只回一句"走了 X 格、还剩 Y 格、约 N 次"，
+   *    不报 around/above/shaft/planTried —— 那些在"还在路上"阶段没有决策价值。
+   *    卡住 / 到达 / 被打断时**不瘦身**，因为那时候每一句都有用。
+   */
+  const slimInfo = (o) => {
+    const keep = ['arrived', 'remaining', 'moved', 'reason', 'ms', 'pathLen', 'estCalls',
+      'held', 'heldRestored', 'heldRestoreWhy', 'via', 'preempted', 'repeat', 'stuck']
+    const r = {}
+    for (const k of keep) if (o[k] !== undefined) r[k] = o[k]
+    return r
+  }
+  const whyShort = (o) => (o?.tooHard
+    ? `眼前 ${o.tooHard.name} 挖不动（要 ${o.tooHard.need || '对的工具'}）`
+    : o?.blockedAhead
+      ? `眼前 ${o.blockedAhead.name} 挡着（${o.blockedAhead.x},${o.blockedAhead.y},${o.blockedAhead.z}）`
+      : o?.reason === 'NoPath'
+        ? '这条路走不通（NoPath）'
+        : o?.reason === 'stuck'
+          ? '还是卡在原地'
+          : '还是没走到')
+  let outInfo = info
+  const bMv = (() => { try { return self.requireBot() } catch { return null } })()
+  if (bMv) {
+    if (!info.arrived && !info.preempted) {
+      const key = [Math.round(Number(target?.x) || 0), Math.round(Number(target?.y) || 0),
+        Math.round(Number(target?.z) || 0), String(info.reason ?? ''),
+        String(info.tooHard?.name ?? info.blockedAhead?.name ?? '')].join('|')
+      const prev = bMv.__moveFail
+      const n = prev && prev.key === key ? Number(prev.n || 0) + 1 : 1
+      try { bMv.__moveFail = { key, n } } catch { /* 假 bot */ }
+      if (n >= 2) {
+        outInfo = {
+          ...slimInfo(info),
+          repeat: n,
+          hint: `⛔ 还是老样子（第 ${n} 次）：${whyShort(info)} —— 别重复发同一个点，换目标或换做法（绕 / 挖 / 搭桥）。`,
+        }
+      }
+    } else {
+      try { bMv.__moveFail = null } catch { /* 假 bot */ }
+    }
+  }
+  /* ③ 中途极简：有进展、没卡住、也不是被打断 —— 只留一句进度。 */
+  /* 只瘦身**走路**这条腿：游泳有自己的收尾口径（`swim-budget` / `swim-shore` 和那句
+   * "再叫一次接着游"是测试与 AI 都依赖的），别拿通用进度句把它盖掉。 */
+  const enRoute = !outInfo.arrived && !outInfo.preempted && !outInfo.repeat && outInfo.via !== 'swim'
+    && Number(outInfo.moved) >= 1 && !outInfo.stuck && !outInfo.blockedAhead && !outInfo.tooHard
+  if (enRoute) {
+    const left = Math.max(0, Math.round(Number(outInfo.remaining) || 0))
+    const calls = Number(outInfo.estCalls) || 0
+    outInfo = {
+      ...slimInfo(outInfo),
+      hint: `🚶 走了 ${Math.round(Number(outInfo.moved) || 0)} 格，还剩约 ${left} 格`
+        + (calls >= 2 ? `（大约还要 ${calls} 次调用，同参数接着叫就行）` : '（再叫一次就到）')
+        + '。',
+    }
+  }
+  const route = routeTrack(self, target, outInfo)
+  if (!route?.stalled) return { ...outInfo, route }
+  return { ...outInfo, route, hint: `${outInfo.hint ? outInfo.hint + '\n' : ''}${route.hint}` }
 }
 
 async function walkToOnce (self, target, { arrive = 1.6, budget = self.cfg.moveBudgetMs, noTower = true, towerFallback = true, intent = 'near', waterRecover, noDig = false, xz = false } = {}, ctx = {}) {
@@ -785,7 +851,12 @@ async function walkToOnce (self, target, { arrive = 1.6, budget = self.cfg.moveB
      *    `waterRecover:false`（AI 明确关掉自救）时不做。 */
     let airFirst = null
     const airNow = Number.isFinite(b.oxygenLevel) ? b.oxygenLevel : null
-    if (airNow != null && airNow <= 120 && ctx.waterRecover !== false) {
+    /* 🔴 2026-10-24 全量体检：**这里的阈值单位写错了** —— `bot.oxygenLevel` 是
+     *    `Math.round(air_supply / 15)`，满值 **20**（300 是原始 `air_supply`，不是这个字段）。
+     *    写 `<= 120` 对 0–20 恒真 ⇒ 只要脚泡在水里、脚不着地，**每次 walkTo 都先白上浮 1.2 秒**，
+     *    还顺带 bumpGen 把代次往前推（把自己上一次的上浮掐掉）。
+     *    改成"低于 8（约 40%）才先换气"。 */
+    if (airNow != null && airNow <= 8 && ctx.waterRecover !== false) {
       try { airFirst = await swimUp(self, { hold: 1_200 }, ctx) } catch { airFirst = null }
     }
     let preRecover = null
@@ -1451,6 +1522,17 @@ export async function openNearbyDoor (b, radius = DOOR_OPEN_R) {
     const me = new Vec3(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z))
     const pressAt = b.__doorPressAt instanceof Map ? b.__doorPressAt : (b.__doorPressAt = new Map())
     const inFlight = b.__doorInFlight instanceof Set ? b.__doorInFlight : (b.__doorInFlight = new Set())
+    /* 🔴 2026-10-24 全量体检：这两个容器挂在 bot 上、**只增不减** —— 一天几百次开门、
+     * 每次都往 Map/Set 里塞一条，长跑几周就是几万条（内存慢慢涨，且没人回收）。
+     * 过期的冷却记录本来也不再起作用，顺手清掉；在途锁只清那些明显残留的（> 30 秒）。 */
+    if (pressAt.size > 256) {
+      const cutoff = Date.now() - DOOR_PRESS_COOL_MS * 4
+      for (const [k, v] of pressAt) if (Number(v ?? 0) < cutoff) pressAt.delete(k)
+    }
+    if (inFlight.size > 64) {
+      const t0 = Date.now()
+      for (const k of inFlight) { if (t0 - Number(pressAt.get(k) ?? 0) > 30_000) inFlight.delete(k) }
+    }
     const now = Date.now()
     const done = new Set()   // 这一轮碰过的门轴（上下半格只算一次）
     for (let dx = -r; dx <= r; dx++) {
@@ -1478,7 +1560,10 @@ export async function openNearbyDoor (b, radius = DOOR_OPEN_R) {
           inFlight.add(key)
           pressAt.set(key, Date.now())
           try {
-            await b.activateBlock(target)
+            /* 🔴 2026-10-24 全量体检：`activateBlock` 要等服务端回包才 resolve，回包丢了就永久挂住
+             * —— 而这里挂住的是**整次 `mc_move`**（外层预算只能 race 掉 Promise，底层调用还在跑）。
+             * 和 vendor 那条 `use_block_error` 同一个道理：给它一个上限。 */
+            await withTimeout(b.activateBlock(target), 1500, '开门')
             const after = await confirmDoorOpen(b, target)
             if (after === 'open') {
               opened++
@@ -1775,7 +1860,10 @@ export async function carveStepAhead (b, target, { cells = MOVE_CARVE_CELLS, rad
   const at = (x, y, z) => { try { return b.blockAt(new Vec3(x, y, z)) } catch { return null } }
   const nameOf = (blk) => { try { return blk?.name ?? null } catch { return null } }
   const solid = (blk) => { const n = nameOf(blk); return Boolean(n) && isSolidBlock(n) }
-  const diggable = diggableBlock
+  /* 🔴 2026-10-24 用户实机：「现在寻路老是会跑到树上」。A* 那边已经把树列进 `blocksCantBreak`，
+   *    但**我们自己的补挖**（卡住时挖开眼前那格）不归 A* 管 —— 它照样会把树叶挖穿，
+   *    于是又爬上去了。这里补上同一条线：树不挖（要砍树请 AI 自己 `mc_dig` 指名砍）。 */
+  const diggable = (blk) => diggableBlock(blk) && !isTreeBlock(nameOf(blk))
   /* 方向：先主轴（离得远的那个轴），再另一条轴 —— 斜着走楼梯时两条都要看。 */
   const sx = Math.sign(dx), sz = Math.sign(dz)
   /* 🔴 2026-10-23 实机（用户："它往 z5 挖而不是 x方向"）：方向**只认主轴**（离得远的那个轴），
@@ -1829,6 +1917,12 @@ export async function carveStepAhead (b, target, { cells = MOVE_CARVE_CELLS, rad
     const blk = at(ox, oy, oz)
     const nm = nameOf(blk)
     if (!nm || !solid(blk) || !diggable(blk) || BRIDGE_FATAL.test(nm) || isLiquid(nm)) return 0
+    /* 🔴 2026-10-24 用户实机（挖雪三坑）：头顶是雪块、手上是镐 ⇒ 以前照样硬挖，
+     *    一直超时；正确做法是**承认挖不动**并把"要什么工具"交给上层去说。 */
+    if (!canBreakNow(b, blk)) {
+      try { b.__carveTooHard = { name: nm, need: toolKinds(b, blk), ms: breakMsNow(b, blk) } } catch {}
+      return 0
+    }
     const fl = nameOf(at(ox, oy - 1, oz))
     if (!fl || !isSolidBlock(fl) || BRIDGE_FATAL.test(fl) || isLiquid(fl)) return 0
     return (await digOne(blk)) ? 1 : 0
@@ -1847,9 +1941,18 @@ export async function carveStepAhead (b, target, { cells = MOVE_CARVE_CELLS, rad
       const floorName = nameOf(floor)
       if (!floorName || !isSolidBlock(floorName) || BRIDGE_FATAL.test(floorName) || isLiquid(floorName)) continue
       const picks = []
-      if (feetHard && diggable(feet)) picks.push(feet)
-      if (headHard && diggable(head)) picks.push(head)
-      if (!picks.length) continue
+      if (feetHard && diggable(feet) && canBreakNow(b, feet)) picks.push(feet)
+      if (headHard && diggable(head) && canBreakNow(b, head)) picks.push(head)
+      if (!picks.length) {
+        /* 有挡路的、但手上这套挖不动（雪块要锹、石头要镐…）⇒ 记下来，别静悄悄跳过。 */
+        const hard = [feetHard ? feet : null, headHard ? head : null].filter(Boolean)
+        const h = hard.find((x) => diggable(x))
+        if (h) {
+          const hn = nameOf(h)
+          try { b.__carveTooHard = { name: hn, need: toolKinds(b, h), ms: breakMsNow(b, h) } } catch {}
+        }
+        continue
+      }
       for (const blk of picks) { if (await digOne(blk)) dug++ }
       if (dug > 0) return dug       // 先挖第一处，挖完让 goto 重算（别一口气把路改了）
     }
@@ -2080,6 +2183,10 @@ export function entityObstacleAhead (b, target, { cells = 2, radius = 1.5 } = {}
   let best = null
   for (const e of ents) {
     if (!e || e === b.entity || !e.position) continue
+    /* 🔴 2026-10-24 实机（用户：在船上 / 刚下船后基本走不了）：**自己骑的那条船**也在 `bot.entities` 里，
+     *    以前没排除 ⇒ 它被报成"实体挡路"，一路触发脱困阶梯（绕行 / 挖开挡路那格），越走越乱。
+     *    vendor 的 `updateCollisionIndex` 同样只跳过 `bot.entity`，补丁在 `tools/patch-mc-deps.mjs`。 */
+    if (b?.vehicle && e === b.vehicle) continue
     const nm = String(e.name ?? e.username ?? e.type ?? '')
     if (!nm || IGNORE.test(nm)) continue
     const pos = e.position
@@ -2628,6 +2735,7 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
    *    只要历史上有过一次"挖到一半被守卫掐断"，之后**每一次** mc_move 的结果都带着 digStalled，
    *    模型会以为"这次挖也没挖动"。按调用清零，只报这一次的。 */
   try { b.__carveDigStalled = 0 } catch { /* 假 bot */ }
+  try { b.__carveTooHard = null } catch { /* 假 bot */ }
   const held0 = heldText(b)
   const snap0 = invSnap(b)     // 垫路会吃掉背包里的方块 —— 走完要如实报"用掉了什么、手上还剩什么"
   /**
@@ -2784,6 +2892,9 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
     ...(pathResetsTotal >= 1 ? { pathResets: pathResetsTotal, pathResetReasons: { ...resetReasons } } : {}),
     /* 挖/换工具在等回包时被守卫掐断过（见 `MOVE_CARVE_DIG_MS`）：这条路"挖过去"没挖动。 */
     ...(Number(b.__carveDigStalled) > 0 ? { digStalled: Number(b.__carveDigStalled) } : {}),
+    /* 2026-10-24 用户实机（挖雪）：挡路的那块**挖不动**——必须单独报，
+     *  否则模型只会看到"卡住"，然后一遍遍重试同一条路。 */
+    ...(b.__carveTooHard ? { tooHard: b.__carveTooHard } : {}),
     /* 执行顺序试到哪一步（2026-10-23）：`planStep` = 最后试的那一级，`planTried` = 这一趟试过的全部。
      *  AI 看到 `planTried` 里有 breakAhead 就该明白"挖也没用"，别再叫同一个点。 */
     ...(planTried.length ? { planStep: planTried[planTried.length - 1], planTried: [...planTried] } : {}),
@@ -3093,7 +3204,12 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
                * 10 秒预算里两下就没了。直接封顶，落到下面的 `attempt++` 换下一招。 */
               if (n <= 0) {
                 carveTries = MOVE_CARVE_TRIES
-                self.log('⛏ 这一下没挖到能挖的（前方没挡路的）—— 不重复试，直接换下一招')
+                if (b.__carveTooHard) {
+                  if (!planTried.includes('tooHard')) planTried.push('tooHard')
+                  self.log(`⛏ 眼前 ${b.__carveTooHard.name} **挖不动**（要 ${b.__carveTooHard.need || '对的工具'}，手上一时半会儿挖不开）—— 不硬挖`)
+                } else {
+                  self.log('⛏ 这一下没挖到能挖的（前方没挡路的）—— 不重复试，直接换下一招')
+                }
               }
               if (n > 0) {
                 carved += n
@@ -3346,6 +3462,15 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
      * 让 AI 自己决定挖、绕、搭桥还是换目标 —— 走路层不替它做这个决定。 */
     let blockedAhead = null
     try { blockedAhead = obstacleAheadOf(b, target) } catch { blockedAhead = null }
+    /* 🔴 2026-10-24 用户实机（挖雪三坑之一）：AI 被告诉"挖掉它"，可手上是镐、那块是雪块，
+     *    于是硬挖到超时，然后再来一遍。挖不动必须**当面说清**，不能只说"挖掉它"。 */
+    let blockedNeed = null
+    if (blockedAhead) {
+      try {
+        const bk = b.blockAt(new Vec3(blockedAhead.x, blockedAhead.y, blockedAhead.z))
+        if (bk && !canBreakNow(b, bk)) blockedNeed = toolKinds(b, bk) || '对的工具'
+      } catch {}
+    }
     /* `reason` 也别把内部字符串原样透出去（旧版漏出过 `Error` / `block_updated`） */
     /* 🔴 2026-10-21 用户：「我看经常 reset」—— 原来这张表只认得 5 个理由，vendor 真正会发的
      *    `chunk_loaded`（走一趟要触发好多次，属于正常重算）、`goal_moved`、`movements_updated`、
@@ -3414,9 +3539,13 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
          + (blockedAhead && !preempted
            ? `—— 眼前挡路的是 **${blockedAhead.name}**（${blockedAhead.cell === 'feet' ? '齐脚那格' : '头顶那格'} `
              + `${blockedAhead.x},${blockedAhead.y},${blockedAhead.z}）：挖得动的话直接 `
-             + (DOOR_RE.test(blockedAhead.name)
+             + (isTreeBlock(blockedAhead.name)
+               ? `是**树**（${blockedAhead.name}）—— **别挖树**（挖开树冠只会让我自己爬上去）：绕开走，或者换个目标点。`
+               : DOOR_RE.test(blockedAhead.name)
                ? `是**门**：\`mc_act {mode:"use", x:${blockedAhead.x}, y:${blockedAhead.y}, z:${blockedAhead.z}}\` 按开它（或走近再叫一次 mc_move，会自动开门），**别挖墙也别挖门**。`
-               : `\`mc_act {mode:"break", x:${blockedAhead.x}, y:${blockedAhead.y}, z:${blockedAhead.z}}\` 挖掉它，再叫 mc_move。`)
+               : blockedNeed
+                 ? `这块**你现在挖不动**（要${blockedNeed}，手上这套挖下去要几十秒，必超时）—— **别硬挖、别重复发同一个目标**：先换个方向绕（或 \`mc_move {noDig:false}\` 另找一条能挖开的路），实在绕不过去就先弄一把${blockedNeed}。`
+                 : `\`mc_act {mode:"break", x:${blockedAhead.x}, y:${blockedAhead.y}, z:${blockedAhead.z}}\` 挖掉它，再叫 mc_move。`)
            : '')
          + (!preempted && terrain.kind === 'gap'
            ? `—— 你脚边是**${terrain.text}**（${terrain.note}）：别绕着试了，直接 \`mc_act {mode:"bridge"}\` 朝目标搭过去。`

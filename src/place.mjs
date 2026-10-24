@@ -356,11 +356,21 @@ export async function placeEntityItem (self, { x, y, z, name = null } = {}, ctx 
    *    `block_place` 对着空气发 ⇒ 服务端直接忽略（不报错、也不生成）。玩家瞄准的永远是水面本身。
    *    所以参考格是空气就往下摸最多 3 格，摸到水/地面为止。 */
   const isAirName = (nm) => /^(air|cave_air|void_air)$/.test(String(nm ?? ''))
+  /* 🔴 2026-10-24 用户：「能走到水边，但是放不下，没有对着水面，太远或者太近」。
+   *    原来往下摸 3 格，摸到**第一个非空气**就停 —— 岸边那一格是泥土/沙子，于是对着泥土上面放船，
+   *    船落到岸上。现在分两趟：先专门找**水**（船/木筏要的就是它），找不到再退回"任意非空气"。 */
+  const isWaterBlk = (nm) => /^(water|bubble_column|kelp|kelp_plant|seagrass|tall_seagrass)$/.test(String(nm ?? ''))
   if (isAirName(ref?.name)) {
+    let water = null
+    let solid = null
     for (let dy = 1; dy <= 3; dy++) {
       const below = b.blockAt(pos.offset(0, -dy, 0))
-      if (below && !isAirName(below.name)) { ref = below; break }
+      if (!below) continue
+      if (!water && isWaterBlk(below.name)) water = below
+      if (!solid && !isAirName(below.name)) solid = below
     }
+    if (water) ref = water
+    else if (solid) ref = solid
   }
   const before = new Set(Object.keys(b.entities ?? {}).map(String))
   const face = new Vec3(0, 1, 0)

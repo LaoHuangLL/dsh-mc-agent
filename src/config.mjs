@@ -19,7 +19,7 @@
  * 一给就表示"所有状态都留在那个临时目录里"。
  * ============================================================================
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, copyFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { normalizeExpressBase } from './express.mjs'
@@ -525,7 +525,15 @@ export class PluginConfig {
   save () {
     try {
       if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true })
-      writeFileSync(this.file, JSON.stringify(this.data, null, 2) + '\n', 'utf8')
+      /* 🔴 2026-10-24 全量体检：原来是**直接覆盖写** —— 写到一半断电 / 被强杀，就留下半截 JSON，
+       * 下次启动 `JSON.parse` 失败 ⇒ 白名单 / 记忆目录 / 分享开关 / MC 模式预设**全丢**
+       * （`load()` 只能退回默认值，用户的配置没有任何备份）。
+       * 改成「写临时文件 + rename」：同一分区上 rename 是原子的，读到的要么是旧文件、要么是新文件。
+       * 顺手留一份 `.bak`，手滑改坏时还能捞回来。 */
+      const tmp = `${this.file}.tmp-${process.pid}`
+      writeFileSync(tmp, JSON.stringify(this.data, null, 2) + '\n', 'utf8')
+      if (existsSync(this.file)) { try { copyFileSync(this.file, `${this.file}.bak`) } catch { /* 备份失败不影响主流程 */ } }
+      renameSync(tmp, this.file)
       return true
     } catch (e) {
       throw new Error(`配置写入失败：${e.message}`)

@@ -348,6 +348,22 @@ section('⑧ 静态接线：core / index 都在')
   const movSrc = strip(readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8'))
   ok(/export async function swimUp \(self, \{ hold = 3_000 \} = \{\}, ctx = \{\}\)/.test(movSrc), 'movement.mjs 有 swimUp(self, {hold=3000}, ctx)')
   ok(/b\.setControlState\('jump', true\)/.test(movSrc), 'swimUp 里按住 jump')
+  /* 🔴 2026-10-24 全量体检：`bot.oxygenLevel` 是 `Math.round(air_supply / 15)`，满值 **20**。
+   *    曾经误写成 `airNow <= 120`（拿 air_supply 的 300 量程去比 oxygenLevel）⇒ 对 0–20 恒真，
+   *    只要脚泡水、脚不着地，每次 walkTo 都先白上浮 1.2 秒，还顺带 bumpGen 掐掉自己。钉住单位。 */
+  ok(/airNow <= 8/.test(movSrc), '换气阈值按 oxygenLevel 的 0–20 量程写（<= 8，约 40%）')
+  ok(!/airNow <= 120/.test(movSrc), '没有再用 air_supply 的量程（120）去比 oxygenLevel')
+  /* 🔴 2026-10-24 实机（用户：「在水里会被水草挡住」）：海草/海带那格不是 water，
+   *    以前 inWaterNow 三条判据全不成立 ⇒ 站在水草里被当成"在陆地上"，原地卡死。
+   *    钉住三处：isWaterLike 存在、inWaterNow 用它、出口搜索也把它当水。 */
+  const obsSrc = strip(readFileSync(new URL('../src/world-observer.mjs', import.meta.url), 'utf8'))
+  const wnavSrc = strip(readFileSync(new URL('../src/water-navigation.mjs', import.meta.url), 'utf8'))
+  const bnSrc = strip(readFileSync(new URL('../src/block-names.mjs', import.meta.url), 'utf8'))
+  ok(/export const isWaterLike =/.test(bnSrc), 'block-names 有 isWaterLike（水 + 水里植物）')
+  ok(/seagrass\|tall_seagrass\|kelp\|kelp_plant/.test(bnSrc), '名单里含海草/高海草/海带')
+  ok(/if \(isWaterLike\(eye\)\) return true/.test(obsSrc), 'inWaterNow 眼高格用 isWaterLike')
+  ok(/return isWaterLike\(n\)/.test(obsSrc), 'inWaterNow 脚格用 isWaterLike')
+  ok(/isWaterLike\(n\) \|\| isLiquid\(n\)\) return 'water'/.test(wnavSrc), '出口搜索把水草当水（不再是墙）')
   /* 🔴 2026-10-08 第十刀：`#inWaterNow` 搬进 `src/world-observer.mjs`（改名 `inWaterNow`）
    *    ⇒ 调用点变成 `inWaterNow(b)`，判据要跟着改，并确认 movement.mjs 真的导入了。 */
   ok(/if \(!inWaterNow\(b\)\) break/.test(movSrc), '出水就 break（走 inWaterNow）')

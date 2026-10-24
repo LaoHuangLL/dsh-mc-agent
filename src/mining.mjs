@@ -22,7 +22,7 @@ const Vec3 = vec3pkg.Vec3 ?? vec3pkg
 
 import { sleep, DESYNC_HINT } from './async-util.mjs'
 import { isAir, isLiquid, isSolidBlock, isPassable } from './block-names.mjs'
-import { heldText, canHarvestNow, toolKinds, countOf, durWarnText } from './inventory.mjs'
+import { heldText, canHarvestNow, canBreakNow, toolKinds, countOf, durWarnText } from './inventory.mjs'
 import { digMsFor } from './dig-speed.mjs'
 import { blockReachOf, slowDigWhy, stateNameOf, dropHint, dropListOf } from './world-observer.mjs'
 import { waitForPickup } from './pickup.mjs'
@@ -188,7 +188,13 @@ export async function breakBlock (self, { x, y, z, allowDangerous = false } = {}
   // ① 先换到对的工具（背包里有的话）—— "手上攥着泥土刨石头"是"一直超时"的头号原因
   const t = await ctx.equipFor(b, blk, `换工具挖 ${name}`)
   // ② 换不上就**别硬挖**：徒手挖石头要 7.5 秒，比一轮预算还长，只会白花时间 + 报个假原因
-  if (!canHarvestNow(b, blk)) {
+  /* 🔴 2026-10-24 用户实机（挖雪三坑之一）：「雪块只能锹挖，手上是铁镐/钻石镐都没用」——
+   *    这句话只对了一半：**没有锹就没有掉落**，但雪块徒手 0.3 秒就挖开。
+   *    以前这里 `!canHarvestNow` 一律抛错，于是"挖开它爬上去"这种正当需求被挡死；
+   *    用户当时的处境是竖井顶上就是雪块、退无可退 ⇒ 报错 → 想做锹 → 要木头 → 木头在地表 →
+   *    地表被雪盖着 ⇒ 死循环。现在分开判：挖得动就挖（并说明没掉落），挖不动才拦。 */
+  const noDrop = !canHarvestNow(b, blk)
+  if (noDrop && !canBreakNow(b, blk)) {
     throw new Error(`手上是 ${t.held}，挖 ${name} ${toolKinds(b, blk)} —— 背包里也没有能挖它的东西。`
       + '先 mc_craft 一把（木镐 = 3 木板 + 2 木棍），或先 mc_act{mode:"equip",name:"…"} 换一个。硬挖会一直超时。')
   }
@@ -284,6 +290,10 @@ export async function breakBlock (self, { x, y, z, allowDangerous = false } = {}
     ...(toolWear ? { toolWear } : {}),
     ...(t.changed ? { tool: `${t.heldBefore} → ${t.held}` } : {}),
     ...(digMs != null ? { digMs } : {}),
+    ...(noDrop ? {
+      note: `挖开了 —— 但**没掉落**（${name} 要 ${toolKinds(b, blk) || '对工具'}才有东西掉）。`
+        + '要是只想清路/爬出去，这样就行了；想要掉落得先弄一把对的工具。',
+    } : {}),
     ...(pickup ? { pickup } : {}),
     ...(drops.length ? { drops } : {}),
     /* 服务端把这一格发成了**液体**（冰挖掉就是水，海草/海带也是）⇒ 破坏**成功**了，只是液体立刻涌了进来。
