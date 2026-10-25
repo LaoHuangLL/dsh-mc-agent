@@ -23,7 +23,7 @@ import { sleep } from './async-util.mjs'
 import { isAir, isLiquid, canPlaceInto, isEntityItem } from './block-names.mjs'
 import { pickPlaceItem, isFullBlockItem } from './place-items.mjs'
 import { heldText } from './inventory.mjs'
-import { standableY } from './movement.mjs'
+import { standableY, portalAt } from './movement.mjs'
 
 /* 🔴 2026-10-23 实机（同一段时间里一条 `mc_move` 挂了 208 秒）：`b.placeBlock` 要等服务端
  *    把方块放进去才 settle，服务端不理（拒绝/失步/延迟）就**永不 settle** ——
@@ -147,6 +147,20 @@ export async function placeBlock (self, { x, y, z, name = null } = {}, ctx = {})
    *    （见下面 `placeEntityItem`）。旧代码一律当方块放，服务端收到的是"对着水右键放方块"，
    *    永远不成：2026-10-20 实机在生存和创造下各试了 3 次，`/execute if entity @e[type=oak_boat]`
    *    一次都没命中。 */
+  /* 🔴 2026-10-25 实机（用户：「末地传送门它还是会在框架上放石头搭到传送门上方挖掉进去」）：
+   *   传送门**紧邻**（水平 1 格 / 上下 1 格）一律不放方块。想进去就走到门方块那一格 —— 站进去服务端会自己传送；
+   *   垫方块只会让它站在框架上方、再挖掉自己搭的东西往下掉，又慢又容易摔（还可能掉进虚空）。
+   *   判据和 `mc_move` 迈门用的是同一个 `portalAt`（只认原版传送门方块名）。 */
+  const nearPortal = portalAt(b, pos.x, pos.y, pos.z, 1)
+  if (nearPortal) {
+    return {
+      placed: false, name: want, at: { x: pos.x, y: pos.y, z: pos.z },
+      blockedBy: 'portal', ...(snapped ? { snapped } : {}),
+      hint: `这里是传送门旁边（**${nearPortal.name}** 在 ${nearPortal.x}, ${nearPortal.y}, ${nearPortal.z}）`
+        + '—— **传送门旁边不放方块**。想进去就 `mc_move` 走到门方块那一格（x/y/z 给那个坐标），'
+        + '站进去服务端会自动传送；不用垫方块、也不用挖方块。',
+    }
+  }
   if (want && isEntityItem(want)) return await placeEntityItem(self, { x: pos.x, y: pos.y, z: pos.z, name: want }, ctx)
   // 选方块：指定名字就给那个；没指定就**只挑整方块**（旧版直接 items[0]，见 pickPlaceItem 注释）
   const pick = () => pickPlaceItem(b, want)

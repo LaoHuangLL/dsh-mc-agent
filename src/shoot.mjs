@@ -32,7 +32,7 @@ import { sleep } from './async-util.mjs'
 import { heldSnapshotOf, restoreHeldOf } from './bridge.mjs'
 import { entityNameOf, pickEntity } from './entity-names.mjs'
 import { loadMcDep } from './plugins.mjs'
-import { arrowSpeedFor, solveArrowLead } from './ballistics.mjs'
+import { arrowSpeedFor, solveArrowLead, solveArrowAll, ARROW_GRAVITY, ARROW_DRAG } from './ballistics.mjs'
 
 /** 能当箭用的物品（`tipped_arrow` 也算；`arrow` 是常态） */
 const ARROW_RE = /^(arrow|spectral_arrow|tipped_arrow)$/i
@@ -324,6 +324,67 @@ async function shootInner (b, args = {}, ctx = {}) {
   /* 兜底弹道要知道"这一箭有多快" ⇒ 先按 waitTime 估一个拉弓时长（循环里真正的 `drawMs`
    * 还会被剩余预算夹一次，那点差别对弹道影响很小，不值得为它重解）。 */
   const estDrawMs = Math.max(MIN_DRAW_MS, Math.min(Number(waitTime) || DEFAULT_DRAW_MS, 20_000))
+  /**
+   * 沿一条弹道采样，看有没有**实心方块**挡着（用户 2026-10-25「现在弓箭只会平射，不会抛射」）。
+   *
+   * 只认 `boundingBox === 'block'`：空气 / 水 / 草 / 藤蔓 / 火把这些箭都能穿过去。
+   * 读不到区块（`blockAt` 回 null）= **不知道**，不当作"挡"。
+   */
+  const blockedAlong = (pitch, yaw, to, speed) => {
+    const me = b.entity?.position
+    if (!me || typeof b.blockAt !== 'function') return null
+    const from = new Vec3(me.x, me.y + Number(b.entity?.eyeHeight ?? 1.62), me.z)
+    const c = Math.cos(pitch)
+    const v = new Vec3(-Math.sin(yaw) * c * speed, Math.sin(pitch) * speed, -Math.cos(yaw) * c * speed)
+    const p = from.clone()
+    const reach = from.distanceTo(to) + 3
+    let unknown = false
+    /* 只跳过"自己站的那一格"（约 0.3 格），原来写 1.3 —— 紧贴着脸的墙（1 格）整段被跳过 ⇒ 漏检。 */
+    const probe = (sx, sy, sz) => {
+      const d = Math.hypot(sx - from.x, sy - from.y, sz - from.z)
+      if (d < 0.6) return null
+      if (d > reach) return 'done'
+      let blk = null
+      try { blk = b.blockAt(new Vec3(Math.floor(sx), Math.floor(sy), Math.floor(sz))) } catch { blk = null }
+      /* 读不到（区块没加载）≠ 没有：记一笔继续往后看，一路都读不到才算"不知道"。 */
+      if (!blk) { unknown = true; return null }
+      if (blk.boundingBox === 'block') return { name: blk.name, at: { x: sx, y: sy, z: sz } }
+      return null
+    }
+    for (let tk = 1; tk <= 240; tk++) {
+      const px = p.x
+      const py = p.y
+      const pz = p.z
+      p.x += v.x; p.y += v.y; p.z += v.z
+      v.x *= ARROW_DRAG; v.y = v.y * ARROW_DRAG - ARROW_GRAVITY; v.z *= ARROW_DRAG
+      /* 🔴 2026-10-26 实机（打末影水晶永远平射）：箭一 tick 走 3 格，原来**只在 tick 端点采样**
+       *   ⇒ 1 格厚的柱子 / 墙 / 台阶被整段跨过去，永远查不出"挡"，于是永远不换抛射。
+       *   现在沿这一段插值（步长 ≤ 0.4 格）。 */
+      const seg = Math.hypot(p.x - px, p.y - py, p.z - pz)
+      const n = Math.max(1, Math.ceil(seg / 0.4))
+      for (let k = 1; k <= n; k++) {
+        const t = k / n
+        const hit = probe(px + (p.x - px) * t, py + (p.y - py) * t, pz + (p.z - pz) * t)
+        if (hit === 'done') return unknown ? { name: null, unknown: true } : null
+        if (hit) return hit
+      }
+    }
+    return unknown ? { name: null, unknown: true } : null
+  }
+
+  /** 最后一道闸：这条弹道会不会撞方块？会就换一条能越过去的（通常是高抛） */
+  const polish = (g, aimed, speed) => {
+    if (!g) return g
+    const p = aimed?.position ?? aimed
+    if (!p || !b.entity?.position || typeof b.blockAt !== 'function') return g
+    const to = new Vec3(p.x, p.y + Number(aimed?.height ?? 0), p.z)
+    const hit = blockedAlong(g.pitch, g.yaw, to, arrowSpeedFor(estDrawMs))
+    if (!hit || hit.unknown) return g
+    const alt = fallbackGrade(aimed, speed, { clearOf: true })
+    if (alt) return { ...alt, wasBlocked: hit.name ?? '?' }
+    return { ...g, blockedBy: hit.name ?? '?' }
+  }
+
   const gradeOf = async (target) => {
     const speed = target.entity ? await speedOf(target.obj, { lead }) : new Vec3(0, 0, 0)
     /* 瞄点：hawkeye 默认瞄包围盒**顶面**（`position + (0, height, 0)`）——末影龙 height=8 ⇒ 翅膀上方。
@@ -349,7 +410,7 @@ async function shootInner (b, args = {}, ctx = {}) {
     const fbErr0 = Number(fbBest?.nearestDistance)
     if (grade && Number.isFinite(gErr0) && Math.abs(Number(grade.pitch) || 0) * 180 / Math.PI <= LOW_ARC_MAX_DEG) {
       /* 两边都是平射解：挑落点更准的（差 0.02 以内算打平，保留 hawkeye 的原解） */
-      return (Number.isFinite(fbErr0) && fbErr0 + 0.02 < gErr0) ? fbBest : grade
+      return polish((Number.isFinite(fbErr0) && fbErr0 + 0.02 < gErr0) ? fbBest : grade, aimed, speed)
     }
     if (grade) {
       /* 🔴 用户 2026-10-19「优先平射」：hawkeye 在同一段距离上常常给出**高抛解**
@@ -357,27 +418,63 @@ async function shootInner (b, args = {}, ctx = {}) {
        *    所以只要它给的仰角超过 LOW_ARC_MAX_DEG，就用自己那套解一条平射的比一比，
        *    误差不比它差太多（≤ +0.5 格）就用平射。 */
       const gdeg = Math.abs(Number(grade.pitch) || 0) * 180 / Math.PI
-      if (gdeg <= LOW_ARC_MAX_DEG) return grade
+      if (gdeg <= LOW_ARC_MAX_DEG) return polish(grade, aimed, speed)
       const low = fallbackGrade(aimed, speed, { preferLow: true })
       const gErr = Number.isFinite(Number(grade.nearestDistance)) ? Number(grade.nearestDistance) : 4
-      if (low && Number(low.nearestDistance) <= gErr + 0.5) return { ...low, preferLow: true }
-      return grade
+      if (low && Number(low.nearestDistance) <= gErr + 0.5) {
+        /* 🔴 2026-10-26 实机「打末影水晶还是只能用平射」：误差小 ≠ 打得中 ——
+         *   水晶都在黑曜石柱顶上，平射轨迹撞柱子/打不到；"优先平射"必须先问一句
+         *   "这条平射真的通吗"，通不过就让位给高抛解。 */
+        /* 🔴 2026-10-26 实机 `Error: to is not defined`：`to` 是 polish/fallbackGrade 的局部变量，
+         *    这里（gradeOf 作用域）根本没有它 —— 自己算一个瞄准点。 */
+        const aimP = aimed?.position ?? aimed
+        const toV = aimP ? new Vec3(aimP.x, aimP.y + Number(aimed?.height ?? 0), aimP.z) : null
+        const blk = toV ? blockedAlong(low.pitch, low.yaw, toV, arrowSpeedFor(estDrawMs)) : null
+        if (!blk || blk.unknown) return polish({ ...low, preferLow: true }, aimed, speed)
+      }
+      return polish(grade, aimed, speed)
     }
     /* 🔴 2026-10-19（用户：「要它在空中射中」「在低上往上射」）：hawkeye 解不出来时不能就此放弃。
      *    实机：站在地面（y≈63）往 y≈85 的龙射，仰角 40°~70°，hawkeye 一律返回 undefined
      *    （提示「算不出弹道：目标 31.1 格、角度也刁」）—— "低处往高处打"整条路被堵死。
      *    兜底：用 `ballistics.mjs` 自己按箭的运动模型暴力扫仰角（带提前量）。 */
-    return fallbackGrade(aimed, speed)
+    return polish(fallbackGrade(aimed, speed), aimed, speed)
   }
 
   /** hawkeye 没有解时的兜底弹道（`ballistics.mjs`）—— 返回形状和 hawkeye 的 grade 对齐 */
-  const fallbackGrade = (aimed, speed, { preferLow = false } = {}) => {
+  const fallbackGrade = (aimed, speed, { preferLow = false, clearOf = false } = {}) => {
     const me = b.entity?.position
     const p = aimed?.position ?? aimed
     if (!me || !p) return null
     const from = new Vec3(me.x, me.y + Number(b.entity?.eyeHeight ?? 1.62), me.z)
     const to = new Vec3(p.x, p.y + Number(aimed?.height ?? 0), p.z)
-    const sol = solveArrowLead({ from, to, vel: speed, speed: arrowSpeedFor(estDrawMs), preferLow })
+    const spd0 = arrowSpeedFor(estDrawMs)
+    /* 🔴 用户 2026-10-25「现在弓箭只会平射，不会抛射」：
+     *    `preferLow` 一律挑低仰角，平射路径上有方块（墙/台阶/树叶/地形）时箭全撞上去。
+     *    这里换成"按误差可接受扫全部候选，挑轨迹上**没有实心方块**的那条"——通常就是高抛。
+     *    一条都不清白 ⇒ 返回 null，让调用方如实说"打不着，被挡着"。 */
+    if (clearOf) {
+      const base = solveArrowLead({ from, to, vel: speed, speed: spd0 })
+      const scan = solveArrowAll({ from, to: base?.aim ?? to, speed: spd0 })
+      if (!scan) return null
+      const tol = Math.max(0.4, Number(ctx?.maxAimError ?? 0.4) + 0.6)
+      for (const c of scan.cands) {
+        if (!(c.err <= tol)) continue
+        if (blockedAlong(c.pitch, scan.yaw, to, spd0)) continue
+        return {
+          yaw: scan.yaw,
+          pitch: c.pitch,
+          nearestDistance: c.err,
+          grade: c.deg,
+          ballistics: true,
+          lob: Math.abs(c.deg) > 10,
+          flyTicks: c.ticks,
+          lead: Boolean(base?.lead),
+        }
+      }
+      return null
+    }
+    const sol = solveArrowLead({ from, to, vel: speed, speed: spd0, preferLow })
     if (!sol) return null
     return {
       yaw: sol.yaw,
@@ -525,6 +622,9 @@ async function shootInner (b, args = {}, ctx = {}) {
       ...(aimH == null ? {} : { aimY: Number(Number(aimH).toFixed(2)) }),
       ...(heldMs == null ? {} : { heldMs }),
       ...(grade.ballistics ? { ballistics: true } : {}),
+      ...(grade.lob ? { lob: true } : {}),
+      ...(grade.wasBlocked ? { lobOver: grade.wasBlocked } : {}),
+      ...(grade.blockedBy ? { blockedBy: grade.blockedBy } : {}),
       ...(newArrow ? { arrowEntity: true } : {}),
     })
     fired++

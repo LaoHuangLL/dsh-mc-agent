@@ -429,7 +429,9 @@ section('⑧ 静态接线：core / index 都在')
   ok(/在水里（氧气/.test(index), 'mc_status 瘦身视图里带氧气')
   ok(/头在水下/.test(index), 'mc_status 读不到氧气时也说清"头在水下"')
   ok(/mode="swim"/.test(index), 'mc_move 描述里写了 swim')
-  ok(/walk \/ walk-nodig \/ fly \/ jump \/ swim/.test(index), 'mode 说明里有 swim（外加不破坏方块的 walk-nodig）')
+  ok(/walk \/ fly \/ jump \/ swim/.test(index), 'mode 说明里有 swim')
+  ok(!/walk \/ walk-nodig \/ fly/.test(index) && !/mode === 'walk-nodig'/.test(index),
+    '`mode:"walk-nodig"` 已删除（2026-10-25 用户要求，和 noDig:true 重复）')
 
   const auto = strip(readFileSync(new URL('../extensions/mc_auto.mjs', import.meta.url), 'utf8'))
   ok(/const DROWN_WAKE_GAP_MS = 6_000/.test(auto), 'mc_auto 有憋气叫醒间隔')

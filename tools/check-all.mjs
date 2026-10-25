@@ -25,14 +25,14 @@ const only = onlyIdx >= 0 ? String(args[onlyIdx + 1] ?? '') : ''
 
 /** 跑的顺序：先核心，再工具，最后会话/日志这类横切的；上游的 check-core 与 selfcheck 放最后。 */
 const ORDER = [
-  'check-core-dig.mjs', 'check-drops.mjs', 'check-block-rollback.mjs', 'check-core-digtime.mjs', 'check-core-place.mjs', 'check-core-entities.mjs', 'check-core-attack.mjs', 'check-combat-timing.mjs', 'check-core-useitem.mjs', 'check-useitem-eat.mjs', 'check-shoot.mjs', 'check-fish.mjs', 'check-prep.mjs',
+  'check-core-dig.mjs', 'check-dig-sight.mjs', 'check-drops.mjs', 'check-block-rollback.mjs', 'check-core-digtime.mjs', 'check-core-place.mjs', 'check-core-entities.mjs', 'check-core-attack.mjs', 'check-combat-timing.mjs', 'check-core-useitem.mjs', 'check-useitem-eat.mjs', 'check-shoot.mjs', 'check-fish.mjs', 'check-prep.mjs',
   'check-core-swim.mjs', 'check-core-map.mjs', 'check-core-inventory.mjs', 'check-core-equip.mjs', 'check-armor-compare.mjs', 'check-core-evidence.mjs',
   'check-call-budget.mjs', 'check-tool-args.mjs', 'check-token-budget.mjs', 'check-async-util.mjs', 'check-worker-pool.mjs', 'check-mc-pathfinder.mjs',
   'check-danger.mjs',
   'check-action-scheduler.mjs', 'check-perf-monitor.mjs', 'check-move-progress.mjs', 'check-bridge.mjs', 'check-terrain.mjs','check-chunk-model.mjs', 
   'check-water-navigation.mjs', 'check-water-recovery.mjs', 'check-task-epoch.mjs', 'check-msa.mjs', 'check-connection-stale.mjs',
   'check-mc-craft.mjs', 'check-mc-furnace.mjs', 'check-mc-chest.mjs', 'check-mc-trade.mjs', 'check-mc-farm.mjs', 'check-generic-names.mjs', 'check-mc-blueprint.mjs',
-  'check-spatial-map.mjs', 'check-look-track.mjs', 'check-mc-stair.mjs', 'check-mc-observe-host.mjs', 'check-mc-view-render.mjs', 'check-mc-skin.mjs',
+  'check-spatial-map.mjs', 'check-look-track.mjs', 'check-mc-stair.mjs', 'check-map-slice.mjs', 'check-mc-drops.mjs', 'check-mc-observe-host.mjs', 'check-mc-view-render.mjs', 'check-mc-skin.mjs',
   'check-mc-auto.mjs', 'check-mc-deps.mjs', 'check-dep-guard.mjs',
   'check-session-memory.mjs', 'check-update-copy.mjs', 'check-rules-file.mjs', 'check-logging.mjs', 'check-watch-chat.mjs', 'check-chat-log.mjs', 'check-audit-session.mjs',
   'check-module-load.mjs',

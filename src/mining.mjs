@@ -176,6 +176,18 @@ export async function breakBlock (self, { x, y, z, allowDangerous = false } = {}
         + ' —— **我没开始挖**（服务端会静默忽略，然后报个假的"挖掉了"）。先 `mc_move` 走到它旁边再挖。',
     }
   }
+  /* 2026-10-25 用户：「不能隔着方块挖」—— 同上：够得着 ≠ 看得见。 */
+  {
+    const see = await canSeeBlockOf(b, pos, { reachMax })
+    if (see && see.ok === false) {
+      return {
+        broken: false, at: { x: pos.x, y: pos.y, z: pos.z }, now: name, held: heldText(b),
+        blockedBy: see.blocker, blockedAt: see.at,
+        note: `前后左右四面都被实心方块包着（**${see.blocker}** 那一面最靠外）—— **隔着方块挖不了**，我没开始挖。`
+          + `要么先挖开挡路那块（${see.at.x}, ${see.at.y}, ${see.at.z}），要么换个角度站过去。`,
+      }
+    }
+  }
   // ①′ 空中挖慢 5 倍（`bot.digTime` 的 `notOnGround`）⇒ 先等落地再动手，别把预算喂给一次注定超时的挖掘
   if (!await ctx.waitGrounded(b, Math.min(1_500, Math.max(0, self.callLeft() - 800)))) {
     return {
@@ -370,20 +382,25 @@ export function stairDirOf (b, { pos = null, dir = null } = {}) {
 }
 
 export async function digStair (self, {
-  pos = null, dir = null, maxSteps = STAIR_MAX_STEPS, budgetMs = 10_000,
+  pos = null, dir = null, targetY = null, maxSteps = STAIR_MAX_STEPS, budgetMs = 10_000,
 } = {}, ctx = {}) {
   const b = self.requireBot()
   const start = b.entity.position.floored()
-  if (!pos || !Number.isFinite(pos.y)) {
+  /* 🔴 2026-10-25 实机 bug（Bluezi 报「我给了 y50 也给了 dir z+ 还是这句」）：
+   *   说明里写"x/z 可选"，但 index.js 只在 x/y/z **三个都有**时才组 pos ⇒ 只给 y 时
+   *   pos 是 null，这里就报"给 y"。改成 ty 独立参数：y 单独就能用，
+   *   pos 只剩"朝哪个点挖"这一个用途（可以没有）。 */
+  const ty = Number.isFinite(Number(targetY)) ? Math.floor(Number(targetY))
+    : (pos && Number.isFinite(pos.y) ? Math.floor(pos.y) : null)
+  if (ty == null) {
     throw new Error('挖阶梯要知道挖到哪一层：给 y（目标高度，整数格）。x/z 可选，用来说朝哪个方向挖。')
   }
-  const targetY = Math.floor(pos.y)
   /* 往上 / 往下都能挖：目标 y 比现在高就是上升阶梯 */
-  const up = start.y < targetY
+  const up = start.y < ty
   const d = stairDirOf(b, { pos, dir })
   if (!d) throw new Error('算不出往哪挖：给 x/z（朝那个点挖）或 dir（"x+" / "x-" / "z+" / "z-"）。')
-  if (up ? start.y >= targetY : start.y <= targetY) {
-    return [`🪜 我已经在 y=${start.y}，目标 y=${targetY} —— 不用挖了（换个目标 y 才有活干）。`]
+  if (up ? start.y >= ty : start.y <= ty) {
+    return [`🪜 我已经在 y=${start.y}，目标 y=${ty} —— 不用挖了（换个目标 y 才有活干）。`]
   }
 
   const t0 = Date.now()
@@ -396,15 +413,13 @@ export async function digStair (self, {
 
   while (steps < MAX) {
     if (Date.now() - t0 > budgetMs) { reason = 'budget'; break }
-    if (up ? cur.y >= targetY : cur.y <= targetY) { reason = 'done'; break }
+    if (up ? cur.y >= ty : cur.y <= ty) { reason = 'done'; break }
     const fx = cur.x + d.x; const fz = cur.z + d.z
     /* 往上 / 往下各一步；脚下 (fy-1) 必须是实心（台阶面），不能踩空 */
     const fy = up ? cur.y + 1 : cur.y - 1
-    /* 往下：走过去那一刻身体还占 cur.y / cur.y+1 ⇒ 挖 fy / fy+1 / fy+2 三格。
-     * 往上：脚下 (fy-1) 那格就是天然台阶面 ⇒ 只挖 fy / fy+1 两格。 */
-    const cells = up
-      ? [{ x: fx, y: fy, z: fz }, { x: fx, y: fy + 1, z: fz }]
-      : [{ x: fx, y: fy, z: fz }, { x: fx, y: fy + 1, z: fz }, { x: fx, y: fy + 2, z: fz }]
+    /* 上下**都是 3 格高**（用户 2026-10-25「stair往上挖也是挖3格」）：
+     * 走过去那一刻身体要占 fy / fy+1 两格，头顶再留 1 格 ⇒ 一律挖 fy / fy+1 / fy+2。 */
+    const cells = [fy, fy + 1, fy + 2].map((y) => ({ x: fx, y, z: fz }))
     const names = cells.map((c) => blkAt(c.x, c.y, c.z)?.name ?? null)
     if (names.some((n) => n == null)) { reason = 'unloaded'; break }
     if (names.some((n) => isLiquid(n))) { reason = 'liquid'; break }
@@ -439,18 +454,18 @@ export async function digStair (self, {
   }
 
   const now = b.entity.position.floored()
-  const left = up ? targetY - now.y : now.y - targetY
+  const left = up ? ty - now.y : now.y - ty
   const body = `挖了 ${steps} 步、${dug} 块方块，从 y=${start.y} 到 y=${now.y}`
   const tail = {
     done: '✅ 到目标高度了。',
-    budget: '⏱ 这一轮 10 秒用完了 —— 再叫一次 `mc_dig {mode:"stair", y:' + targetY + '}` 接着挖（已经挖好的不会白挖）。',
+    budget: '⏱ 这一轮 10 秒用完了 —— 再叫一次 `mc_dig {mode:"stair", y:' + ty + '}` 接着挖（已经挖好的不会白挖）。',
     liquid: '🌊 前面是水/岩浆，不往那边挖了 —— 换个方向（`dir:"x-"` 之类）或者先绕开。',
     'no-floor': '🕳 前面脚下是空的（深洞/矿洞），不敢再挖 —— 换个方向，或者先看看那边是什么。',
     stuck: '⛔ 挖开了但没走过去（卡住）—— 先 `mc_observe` 看一眼，别原地重叫。',
     unloaded: '⏳ 前面的区块还没加载完 —— 等一下再叫。',
   }[reason] ?? ''
   const hint = reason === 'done' ? '' : `
-还剩 ${Math.max(0, left)} 格到 y=${targetY}。`
+还剩 ${Math.max(0, left)} 格到 y=${ty}。`
   return [`🪜 阶梯：${body}。${hint}`, tail, ...notes].filter(Boolean)
 }
 
@@ -463,10 +478,10 @@ export async function dig (self, {
    *   towerFallback：走不通时允不允许"垫一格方块往上"。默认 false —— 以前这个兜底
    *     无视 noTower 一律会跑，于是"明明够得到"也会原地搭柱子。 */
   noDig = true, towerFallback = false,
-  mode = 'block', dir = null, maxSteps = STAIR_MAX_STEPS, budgetMs = 10_000,
+  mode = 'block', dir = null, targetY = null, maxSteps = STAIR_MAX_STEPS, budgetMs = 10_000,
 } = {}, ctx = {}) {
   /* 2026-10-25 用户：「下矿时 AI 更倾向直上直下，而不选择挖阶梯」⇒ stair 模式。 */
-  if (mode === 'stair') return await digStair(self, { pos, dir, maxSteps, budgetMs }, ctx)
+  if (mode === 'stair') return await digStair(self, { pos, dir, targetY, maxSteps, budgetMs }, ctx)
   const b = self.requireBot()
   const out = []
   const held0 = heldText(b)
@@ -677,6 +692,19 @@ export async function dig (self, {
           ? { x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }
           : { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }
         const w = await self.walkTo(stand, { arrive: 2.2, budget, noDig, towerFallback })
+        /* 🔴 2026-10-25 用户：「dig 如果没办法到那格应该自动切换成可破坏」——
+         *   默认不挖（只绕路）走不过去时，**自动**改成允许挖穿挡路的方块再走一次。
+         *   只在真的还够不着时重试，并且只用本轮剩下的时间（不把整轮吃光）。 */
+        if (noDig && fresh && fresh.name === nm && blockReachOf(b, fresh) > reachMax) {
+          const rest = self.callLeft()
+          if (rest > 1200) {
+            const w2 = await self.walkTo(stand, { arrive: 2.2, budget: Math.min(budget, rest), noDig: false, towerFallback })
+            fresh = b.blockAt(p)
+            if (w2?.arrived === true || (fresh && fresh.name === nm && blockReachOf(b, fresh) <= reachMax)) {
+              out.push(`绕不过去（${w?.reason ?? '路被方块挡着'}）—— 已改成**挖穿挡路的方块**走过去`)
+            }
+          }
+        }
         fresh = b.blockAt(p)
         /* 🔴 2026-10-15 审计：`b.blockAt(p)` 在**区块卸载**时返回 null，而以前 `!fresh` 和
          *    `fresh.name !== nm` 走同一条路 ⇒ 把"读不到"当成"走过去顺手挖掉了"，`okCount++`
@@ -711,7 +739,17 @@ export async function dig (self, {
           out.push(`够不着 ${nm} @ ${p}（眼睛到方块中心 ${away.toFixed(1)} 格，`
             + `${w?.arrived ? '走过去也只到这么远' : '走过去也没走到'}）—— `
             + '先 `mc_move` 到它旁边（或换个近一点的目标）再叫我挖：站远了挖服务端不认，方块会"复原"。'
-            + (noDig ? '（这条路被方块挡着走不过去的话，带 `digThrough:true` 叫我，我挖穿过去）' : ''))
+            + (noDig ? '（已经试过挖穿挡路的方块，还是到不了）' : ''))
+          continue
+        }
+      }
+      /* 2026-10-25 用户：「不能隔着方块挖」—— 够得着（眼睛→中心 ≤ 4.5）不等于**看得见**。 */
+      {
+        const see = await canSeeBlockOf(b, p, { reachMax })
+        if (see && see.ok === false) {
+          out.push(`${nm} @ ${p} 前后左右四面都被实心方块包着（**${see.blocker}** 那一面最靠外）—— **隔着方块挖不了**，这一格没挖。`
+            + `要么先挖开挡路那块 \`mc_act {mode:"break", x:${see.at.x}, y:${see.at.y}, z:${see.at.z}}\`，`
+            + '要么 `mc_move` 换个角度站过去再叫我')
           continue
         }
       }
@@ -837,6 +875,74 @@ export async function dig (self, {
   }
 }
 
+/**
+ * 眼睛能不能**直着**看见这一格方块（中间没有别的实心方块挡着）。
+ *
+ * 2026-10-25 用户：「现在会隔着方块挖矿，能不能改成不能隔着方块挖」——
+ *   以前只判「眼睛→方块中心 ≤ 4.5」，于是站在墙角 / 隔着一层石头也能"挖"到后面的矿：
+ *   服务端不查遮挡，客户端就把那格预测成 air，画面上就是"隔着方块挖"（挖完还常常复原）。
+ *
+ * 返回：
+ *   · `{ ok: true }` —— 看得见，可以挖
+ *   · `{ ok: false, blocker, at }` —— 被 `blocker` 挡着（`at` 是它那一格的坐标）
+ *   · `null` —— 判不了（没有 `world.raycast` / 读不到方块 / 射线报错）⇒ **不拦**，保持老行为
+ *
+ * 只把**实心方块**当遮挡（水 / 草 / 藤蔓 / 火把都能穿过去），和 `mc_shoot` 的 `blockedAlong` 同口径。
+ */
+/**
+ * 这一格方块能不能挖（会不会是"隔着方块挖"）。
+ *
+ * 判据（2026-10-25 用户三次收紧/放宽后的定稿）：
+ *   ① **贴身 1 格一律放行** —— 脚下那块、头顶那块、水平相邻 8 格、斜下方 1 格。
+ *      射线是从自己眼睛出发的，第一块实心方块经常就是自己踩的地板，
+ *      于是"站在铁矿上挖不了，被 stone 挡着"（实机踩过）。
+ *   ② 其余看**前后左右四格**：只要有一格是空的（空气 / 可通行），就能挖 ——
+ *      那一面就是"能看见/能伸进去"的那一面。用户原话：
+ *      「改成方块前后左右有一格方块是空的就可以挖」。
+ *   ③ 四面全被实心包住 ⇒ 才是真正的"隔着方块挖"，拦下并说清是哪面挡着。
+ *   ④ 读不到方块 / 够不着（眼→方块中心 > reachMax+1）⇒ `null`，**不拦**（判不了就别拒绝干活）。
+ *
+ * 返回：
+ *   · `{ ok: true }` —— 能挖
+ *   · `{ ok: false, blocker, at }` —— 四面全实心（`at` 是其中一面的坐标，可以去挖开）
+ *   · `null` —— 判不了 ⇒ 不拦
+ *
+ * 只把**实心方块**当遮挡（水 / 草 / 藤蔓 / 火把都算"空的"），和 `mc_shoot` 的 `blockedAlong` 同口径。
+ */
+export async function canSeeBlockOf (b, p, { reachMax = 4.5 } = {}) {
+  const eye = b?.entity?.position
+  if (!eye || !p) return null
+  const at = (x, y, z) => { try { return b.blockAt(new Vec3(x, y, z)) } catch { return null } }
+  const gx = Math.floor(p.x); const gy = Math.floor(p.y); const gz = Math.floor(p.z)
+  const target = at(gx, gy, gz)
+  if (!target) return null
+  /* 目标本身不是实心（草、火把、藤蔓…）：本来就没有"隔着方块"一说 ⇒ 不拦。 */
+  if (target.boundingBox !== 'block') return null
+  /* ① 贴身一圈（含脚下 / 头顶 / 斜角）不查遮挡 */
+  const fx0 = Math.floor(eye.x); const fy0 = Math.floor(eye.y); const fz0 = Math.floor(eye.z)
+  if (Math.max(Math.abs(gx - fx0), Math.abs(gy - fy0), Math.abs(gz - fz0)) <= 1) return { ok: true }
+  /* 够不着就别在这儿判"隔着方块"（上层会报"够不到"） */
+  const V = eye.constructor
+  const from = new V(eye.x, eye.y + 1.62, eye.z)
+  const dist = from.distanceTo(new V(gx + 0.5, gy + 0.5, gz + 0.5))
+  if (!(dist > 0) || dist > reachMax + 1) return null
+  /* ② 前后左右（北南西东）只要有一面是空的，就能挖 */
+  const sides = [[0, -1], [0, 1], [-1, 0], [1, 0]]
+  const around = []
+  for (const [dx, dz] of sides) {
+    const nb = at(gx + dx, gy, gz + dz)
+    if (!nb) return null                       // 有一面读不到 ⇒ 判不了，不拦
+    around.push({ dx, dz, nb })
+  }
+  if (around.some((s) => isAir(s.nb.name) || isPassable(s.nb.name))) return { ok: true }
+  /* ③ 四面全实心：拦下，报第一面（北）那块的坐标 */
+  const s0 = around[0]
+  return {
+    ok: false,
+    blocker: s0.nb.name ?? '方块',
+    at: { x: gx + s0.dx, y: gy, z: gz + s0.dz },
+  }
+}
 /**
  * 挑一个"走到那里就够得着 p 这块矿"的落脚点（2026-10-23，用户「够得到还搭方块」）。
  * 候选 = 矿块周围一圈（含上下）的可站格，过滤条件是眼睛→矿块中心 ≤ reachMax，

@@ -280,8 +280,8 @@ section('5. getMoveDiagonal()：斜切拐角被禁（这才是实机真正的病
 }
 
 
-/* ─────────── 6. 「不破坏方块」的走路模式（noDig / walk-nodig）─────────── */
-section('6. mc_move 的 noDig / walk-nodig：走路一格都不挖')
+/* ─────────── 6. 「不破坏方块」的走路模式（noDig）─────────── */
+section('6. mc_move 的 noDig：走路一格都不挖')
 
 /* 用户 2026-10-20：「move 加一个不破坏方块的模式」。这条链路跨两个文件：
  *   index.js（mc_move 的参数与分发）→ src/movement.mjs（walkTo/walkToOnce/walkPathfinder 把
@@ -293,13 +293,34 @@ const mvSrc = readFileSync(join(HERE, '..', 'src', 'movement.mjs'), 'utf8')
 const countOf = (hay, needle) => hay.split(needle).length - 1
 
 ok(/noDig: \{ type: 'boolean'/.test(mcIndexSrc), 'mc_move 有 noDig 参数')
-ok(/walk \/ walk-nodig \/ fly/.test(mcIndexSrc) && /mode === 'walk-nodig'/.test(mcIndexSrc), 'mc_move 认 mode:"walk-nodig"（参数说明 + 分发）')
-ok(/const noDig = mode === 'walk-nodig' \? true : args\.noDig !== false/.test(mcIndexSrc),
-  '默认不挖：只有显式 noDig:false 才允许挖（mode:"walk-nodig" 恒为 true）')
+ok(/walk \/ fly \/ jump \/ swim \/ boat/.test(mcIndexSrc), 'mode 说明里没有 walk-nodig（已删）')
+ok(!/mode === 'walk-nodig'/.test(mcIndexSrc), '分发里没有 walk-nodig 分支（已删）')
+ok(/const noDig = args\.noDig !== false/.test(mcIndexSrc),
+  '默认不挖：只有显式 noDig:false 才允许挖')
 const seqSrc = readFileSync(join(HERE, '..', 'src', 'sequence.mjs'), 'utf8')
 ok(/noDig: s\.noDig !== false/.test(seqSrc), 'mc_sequence 的 move 步骤默认也不挖（和 mc_move 一致）')
-ok(countOf(mcIndexSrc, 'noDig, intent: intentArgOf(args.intent)') === 2,
-  'noDig 传进了两条 walkTo（walk 与「swim 给坐标」那条）', String(countOf(mcIndexSrc, 'noDig, intent: intentArgOf(args.intent)')))
+ok(countOf(mcIndexSrc, 'noDig, intent: intentArgOf(args.intent)') === 1
+  && countOf(mcIndexSrc, 'noDig, noTower: args.allowTower !== true, intent: intentArgOf(args.intent)') === 1,
+  'noDig 传进了两条走路调用（walk 与「swim 给坐标」那条）')
+/* 2026-10-25（用户：「move和dig如果没办法到那格应该自动切换成可破坏」）：
+ *   walk 那条改走 `walkWithAutoDig` —— 先不挖走一遍，走不通自动改成挖穿挡路方块再走。 */
+ok(/walkWithAutoDig\(sess, target, \{ noDig, noTower: args\.allowTower !== true/.test(mcIndexSrc),
+  'walk 走自动挖穿兜底（walkWithAutoDig）')
+ok(/const walkWithAutoDig = async \(sess, target, opts, budgetMs, autoDig\)/.test(mcIndexSrc),
+  'walkWithAutoDig 收 autoDig 开关（显式 noDig:false 时不自动挖）')
+ok(/autoDigWorth/.test(mcIndexSrc) && /AUTO_DIG_REASONS/.test(mcIndexSrc),
+  '只对「路被挡/卡住/不可达/头顶被堵」这类原因升级，其余不重试')
+/* 🔴 2026-10-25 自查抓到的真 bug：AUTO_DIG_REASONS 里原来写的是 'stuck' / 'no-path' / 'unreachable'
+ *   —— movement 根本不产生这几个值（真实值是 `NoPath` 等），等于自动挖穿从来没触发过。
+ *   这条断言把「名单里的每个值都必须真在 movement 源码里出现」钉死，防止再写幽灵值。 */
+{
+  const m = mcIndexSrc.match(/AUTO_DIG_REASONS = new Set\(\[([^\]]+)\]\)/)
+  const names = m ? [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]) : []
+  ok(names.length >= 3, 'AUTO_DIG_REASONS 至少列了 3 个原因', names.join(','))
+  const ghosts = names.filter((n) => !mvSrc.includes(`'${n}'`))
+  ok(ghosts.length === 0, '名单里没有幽灵值（每个都真在 movement 里出现过）', ghosts.join(',') || '无')
+  ok(names.includes('NoPath'), '认了 NoPath（"这条路走不通"最主要的那个）', names.join(','))
+}
 ok(countOf(mvSrc, 'noDig = false, xz = false } = {}, ctx = {})') === 3,
   'walkToUnguarded / walkToOnce / walkPathfinder 三个函数都收 noDig（连 xz 一起逐层转发）',
   String(countOf(mvSrc, 'noDig = false, xz = false } = {}, ctx = {})')))
@@ -340,5 +361,27 @@ ok(/!blockC\.physical && !blockC\.liquid/.test(patchSrc),
 ok(/!blockD\.physical && !blockD\.liquid/.test(patchSrc),
   '水里不垫方块：脚下那格是水时也不规划放方块')
 
+/* ── 传送门：xz 目标也要迈那一步（2026-10-25 实机「还是走不进末地传送门」） ── */
+section('传送门：只给 x/z 也要能进')
+{
+  const mv = mvSrc
+  ok(!/xz \? null : portalAt/.test(mv), '🔴 不再有「xz 目标不判传送门」那条短路')
+  ok(/const portalProbeY = Number\.isFinite\(Number\(ty\)\) \? Number\(ty\) : \(b\?\.entity\?\.position\?\.y \?\? 0\)/.test(mv),
+    'xz 时用自己脚下的 y 当探针（xz 分支的 ty 是 undefined）')
+  ok(/portalAt\(b, Math\.floor\(target\.x\), portalProbeY, Math\.floor\(target\.z\), xz \? 2 : 1\)/.test(mv),
+    'xz 时半径放到 2，覆盖上下一层')
+  ok(/const GoalXZ = \(xz && !gp\.portal\) \? goals\?\.GoalXZ : null/.test(mv),
+    '命中门就升级成三维精确目标（GoalXZ 只锁水平两维，人站不进去）')
+}
+
 console.log(`\n${fail === 0 ? '✓ 全部通过' : '✗ 有失败项'}：pass=${pass} fail=${fail}`)
+ok(/bot\.pathfinder\.sneakWhenPlacing = false/.test(indexSrc),
+  'vendor 默认就是「站着放」（sneakWhenPlacing 初始化为 false）')
+ok(/if \(bot\.pathfinder\.sneakWhenPlacing === false\) return true/.test(indexSrc),
+  '放方块前可以跳过「蹲着后退贴到边缘」（sneakWhenPlacing=false）')
+ok(/b\.pathfinder\.sneakWhenPlacing = false/.test(readFileSync(resolve(HERE, '../src/plugins.mjs'), 'utf8')),
+  '我们自己把 sneakWhenPlacing 关掉了 —— 站着直接放，不蹲着贴边')
+ok(/放方块前不再蹲着贴边/.test(patchSrc),
+  'patch-mc-deps 里有「不再蹲着贴边」这条补丁')
+
 process.exit(fail === 0 ? 0 : 1)

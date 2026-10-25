@@ -48,7 +48,7 @@ import { EXPRESS_DIR, OUT_DIR, expressRootOf, outRootOf, parseExpressPath, safeE
 import { Watchdog, WATCH_DEFAULTS } from './src/watchdog.mjs'
 /* 2026-10-15：`mc_map` 默认改成"脚下方块那一层"（地板层视图）—— 直接调 `src/map-render.mjs`
  * 的新函数，**不往 `core.mjs` 加薄包装**（那个文件已经贴着 `check-module-load` 的 1000 行上限）。 */
-import { floorMapOf, navSummaryOf, hazardCellsOf, columnOf, columnText, parseXZ, surfaceYOf } from './src/map-render.mjs'
+import { floorMapOf, navSummaryOf, hazardCellsOf, columnOf, columnText, parseXZ, surfaceYOf, sliceMapOf, sliceMapText } from './src/map-render.mjs'
 /* 2026-10-15：事件循环延迟 / CPU 占用监测（用户「异步与多线程优化」方案第 1 步）——
  * **用数据决定要不要上 Worker 线程**，`mc_diag` 的 `perf` 段直接给结论。 */
 import { perfWrap, perfSnapshot, perfText, perfReset } from './src/perf-monitor.mjs'
@@ -2608,6 +2608,42 @@ export function apply(ctx, rawConfig) {
   }
 
   /**
+   * 🔴 2026-10-25（用户：「move和dig如果没办法到那格应该自动切换成可破坏」）：
+   *   默认不挖（`noDig:true`）走不通时，**自动**改成允许挖穿挡路方块再走一次。
+   *   只在这几种原因上重试：路被方块挡住 / 卡住 / 目标不可达 / 头顶被堵（`no-headroom`）。
+   *   区块没加载、预算用完、危险方块、服务端不回包、被叫停都不重试（挖了也没用，还可能添乱）。
+   *   时间分配：第一遍不挖只给 40%（优先让它绕路），剩下的 60% 留给挖穿那一遍（总共仍不超过一次调用的预算）。
+   */
+  /* 🔴 2026-10-25 自查：以前这里写的是 'stuck' / 'no-path' / 'unreachable' —— **全是幽灵值**，
+   *   `src/movement.mjs` 根本不产生这几个 reason（真实值是下面这些，含大写 `NoPath`）。
+   *   写错就等于自动挖穿从来没生效过，所以列真值并把断言钉在 `check-mc-pathfinder`。 */
+  const AUTO_DIG_REASONS = new Set(['NoPath', 'ceiling', 'goal-not-standable', 'goal-reached-elsewhere', 'goal_reached-but-far'])
+  const autoDigWorth = (r) => Boolean(r) && r.arrived === false
+    && (AUTO_DIG_REASONS.has(String(r.reason ?? '')) || r?.stepUp?.why === 'no-headroom')
+  const walkWithAutoDig = async (sess, target, opts, budgetMs, autoDig) => {
+    const total = callBudget(budgetMs)
+    if (!autoDig) return await sess.bot.walkTo(target, { ...opts, noDig: opts.noDig !== false, budget: total })
+    const t0 = Date.now()
+    const first = await sess.bot.walkTo(target, { ...opts, noDig: true, budget: Math.max(1500, Math.min(Math.floor(total * 0.4), total - 1500)) })
+    if (!autoDigWorth(first)) return first
+    const left = total - (Date.now() - t0)
+    if (left < 1500) return first
+    const second = await sess.bot.walkTo(target, { ...opts, noDig: false, budget: left })
+    if (second?.arrived === true) {
+      return {
+        ...second,
+        autoDug: true,
+        hint: [second.hint, '（默认不挖走不通，已自动改成挖穿挡路的方块过去）'].filter(Boolean).join(' '),
+      }
+    }
+    return {
+      ...first,
+      autoDugTried: true,
+      hint: [first.hint, `（不挖和挖穿都试过了，还是没到：${first.reason ?? '未知原因'}）`].filter(Boolean).join(' '),
+    }
+  }
+
+  /**
    * 工具定义统一入口：
    *   ① 返回值无损化（宿主要求无损 JSON；mineflayer 到处返回 Vec3 类实例）
    *   ② 注入本轮 turn 的 exec.signal 给 bot —— 这是"停止按钮真的有效"的关键：
@@ -3567,6 +3603,7 @@ export function apply(ctx, rawConfig) {
       + '（跑远路前先探一眼，比猜 y 靠谱）；读不到 = 区块没加载，别猜。'
       + 'format="image" 出**俯视图像**（有视觉的模型能直接看，并落盘）。'
       + '🔴 想让 用户 看到图：见 out 参数。'
+      + '🔴 **看竖直剖面（洞顶/矿脉/有没有落石）用 `axis:"x"` 或 `"z"`**（固定一条 x 或 z，纵轴是 y）；`axis:"all"` 三张一起给。'
       + '字符图省 token 且坐标精确；形状/外观问题用图像。'
       + '（字符图**默认不压缩**，一行就是一格；确实要省 token 再加 compress:true。）',
     parameters: {
@@ -3575,7 +3612,8 @@ export function apply(ctx, rawConfig) {
       purpose: { type: 'string', description: 'overview（默认）/ navigation（加目标方位）/ hazards（先列危险格）' },
       target: { type: 'string', description: '（可选）目标坐标 "x,y,z"（mc_scan 给的）；竖列图用它定 x/z' },
       up: { type: 'number', description: '竖列图头顶看几格（默认 40）' },
-      layer: { type: 'number', description: 'floor 层的 y（默认 feetY-1）' },
+      axis: { type: 'string', description: 'floor 的切片方向：y（默认，水平看某一层）/ x（固定 x 的竖直剖面）/ z（固定 z 的竖直剖面）/ all（三张一起）' },
+      layer: { type: 'number', description: 'floor 的层（axis:"y" 时是 y，"x" 时是 x，"z" 时是 z；默认取我自己那一格）' },
       depth: { type: 'number', description: 'floor 层往下探几格找地面（默认 4，0–8）' },
       glyphStep: { type: 'number', description: '字符图抽稀步长（默认 2；1 最细）' },
       compress: { type: 'boolean', description: '整行同字符压成 X*n（默认 false：给纯字符图，能看出形状；只在确实要省 token 时开）' },
@@ -3646,6 +3684,32 @@ export function apply(ctx, rawConfig) {
           ...(mineXZ ? {} : { mine: false, surfaceY: sf.y, surfaceBlock: sf.name }),
           text: columnText(view),
         }
+      }
+      /* 🔴 2026-10-25 用户：「map floor 加 x z all 的功能，默认还是 y」——
+       * floor 默认是**水平切片**（固定 y）。axis:"x"/"z" 改成**竖直剖面**（固定 x 或 z、纵轴 y），
+       * axis:"all" 三张一起给。剖面只如实报「那一格是什么」，不判断能不能站（那是 floor 的语义）。 */
+      const axisArg = String(args.axis ?? 'y').toLowerCase()
+      if (mode === 'floor' && (axisArg === 'x' || axisArg === 'z' || axisArg === 'all')) {
+        const bot = sess.bot.requireBot()
+        const axes = axisArg === 'all' ? ['y', 'x', 'z'] : [axisArg]
+        const parts = []
+        const out = { mode: 'floor', axis: axisArg, format: 'chars', cellSize: step }
+        for (const ax of axes) {
+          if (ax === 'y') {
+            const hm = floorMapOf(bot, { radius: args.radius, layer: args.layer, depth: args.depth })
+            parts.push(`【y 平面：y=${hm.layer.y}（脚下方块那一层）】\n`
+              + McBot.glyphMap(hm.names, step, { x: hm.radius, y: hm.radius }, { compress: args.compress === true }))
+            out.y = { layer: hm.layer, radius: hm.radius }
+          } else {
+            const down = Math.max(1, Math.abs(Number(args.yBottom ?? -12)) || 12)
+            const sm = sliceMapOf(bot, { axis: ax, layer: args.layer, radius: args.radius, up: args.up, down })
+            parts.push(`【${ax} 剖面：${ax}=${sm.fixed}（纵轴 y ${sm.topY}→${sm.bottomY}，横轴 ${ax === 'x' ? 'z' : 'x'}）】\n`
+              + sliceMapText(sm, { step, compress: args.compress === true }))
+            out[ax] = { fixed: sm.fixed, topY: sm.topY, bottomY: sm.bottomY, radius: sm.radius }
+          }
+        }
+        out.text = parts.join('\n\n') + '\n图例：# 实心 · 空气 ~ 水 ≈ 岩浆 ? 未加载 @ 我'
+        return out
       }
       /* `floor` 走新函数（直接 import `src/map-render.mjs`，不经过 `core.mjs` 的薄包装 —— 那文件贴着 1000 行上限）；
        * `surface` 走 `sess.bot.heightmap()`（它现在只会出地表图，没有 mode/slab）。 */
@@ -3836,7 +3900,7 @@ export function apply(ctx, rawConfig) {
       + '🔴 **一次只走 10 秒**。没走到返回 `arrived:false`+`remaining`+`hint`——**再叫一次往同一目标走**。\n'
       + '快淹死用 `mode:"swim"`（不给坐标）。\n'
       + '🔴 **默认不挖方块**：走路一格都不挖，只绕路/跳/下蹲过缝；'
-      + '要挖必须显式 `noDig:false`（`mode:"walk-nodig"` 恒不挖）。\n'
+      + '要挖必须显式 `noDig:false`。\n'
       + '🔴 默认不垫 1×1 柱（`allowTower:true` 才允许）；上高处走斜台阶会报 `pillaredWith`。\n'
       + '🪜 **一格台阶会先试着踩上去**（量真实位移才算成功）；站上去头顶被堵就跳不起来 —— 允许挖时只清头顶那格，不挖报 `stepUp.why="no-headroom"`。\n'
       + '🔴 走不动会分清挡着的是什么：`entity`（实体，别挖）/ `lava`（岩浆，挖不动）/ `waiting_chunks`（区块没加载，等）/ `stepUp`（一格台阶）。\n'
@@ -3852,7 +3916,7 @@ export function apply(ctx, rawConfig) {
       x: { type: 'number' },
       y: { type: 'number', description: '脚底那格：y=77 站在 76 的方块上，不是 76 那块' },
       z: { type: 'number' },
-      mode: { type: 'string', description: 'walk / walk-nodig / fly / jump / swim / boat（创造缺省 fly；jump 不需坐标；swim 不给坐标=只上浮换气；boat 要先上船）' },
+      mode: { type: 'string', description: 'walk / fly / jump / swim / boat（创造缺省 fly；jump 不需坐标；swim 不给坐标=只上浮换气；boat 要先上船）' },
       noDig: { type: 'boolean', description: '走路时挖不挖方块（**默认不挖**）；要挖穿挡路的写 false' },
       xz: { type: 'boolean', description: '长程赶路：只给 x/z 就够（按"到那一列"算 GoalXZ）；给了 y 就按 y 走；写 false 等于必须给 y；fly/boat 仍必须给 y' },
       budgetMs: { type: 'number', description: 'walk/swim 最长时间（≤10000）；swim 上浮默认 9000' },
@@ -3865,12 +3929,12 @@ export function apply(ctx, rawConfig) {
     async execute(args, exec) {
       const sess = getSession(exec)
       const mode = String(args.mode ?? '')
-      /* 「不破坏方块的模式」= `mode:"walk-nodig"` 或 `noDig:true`（用户 2026-10-20）。
-       * 只影响走路那一条：寻路的 `canDig` 关掉，卡住时"挖开台阶"的补救也关掉
-       * （见 `src/movement.mjs` 的 `walkPathfinder`）。 */
       /* 用户 2026-10-20 定：**默认不挖** —— 走路一格都不挖，非挖不可要显式 `noDig:false`。
-       * `mode:"walk-nodig"` 仍恒为 true（旧写法/显式声明都还能用）。 */
-      const noDig = mode === 'walk-nodig' ? true : args.noDig !== false
+       * 只影响走路那一条：寻路的 `canDig` 关掉，卡住时"挖开台阶"的补救也关掉
+       * （见 `src/movement.mjs` 的 `walkPathfinder`）。
+       * 2026-10-25 用户：「删掉」`mode:"walk-nodig"` —— 它跟 `noDig:true` 效果重复，
+       *   唯一区别是硬盖住 `noDig:false`，而默认本来就不挖，留着只会让人多学一个值。 */
+      const noDig = args.noDig !== false
       if (mode === 'jump') return { ...(await sess.bot.jump()), ...aroundOf(sess) }
       if (mode === 'swim') {
         // 给了坐标 = 游过去（walkTo 在水里会自动走"直接游"那条）；没给 = 只上浮换气
@@ -3901,7 +3965,7 @@ export function apply(ctx, rawConfig) {
         ? { x: numOf(args.x, 'x'), y: Math.floor(Number(sess.bot.bot?.entity?.position?.y ?? 64)), z: numOf(args.z, 'z') }
         : coordOf(args)
       const creative = sess.bot.bot?.game?.gameMode === 'creative'
-      const use = (mode === 'walk-nodig' ? 'walk' : mode) || (creative ? 'fly' : 'walk')
+      const use = mode || (creative ? 'fly' : 'walk')
       // 🔴 2026-10-08 审计⑤：fly 以前不传 budgetMs —— 写 budgetMs:2000 也照样跑满 10 秒
       if (use === 'fly') {
         if (wantsXZ) throw new Error('fly 是三维直飞，必须给 y（xz:true 只对 walk 有效）')
@@ -3911,8 +3975,9 @@ export function apply(ctx, rawConfig) {
         if (wantsXZ) throw new Error('boat 要有终点高度，必须给 y（xz:true 只对 walk 有效）')
         return { ...withOutcome(await sess.bot.driveBoat(target, { arrive: args.intent === 'stand' ? 1.2 : 2, budget: callBudget(args.budgetMs) }), { expect: 'moved' }), ...aroundOf(sess) }
       }
-      if (use !== 'walk') throw new Error(`未知 mode："${use}"（可用 walk / walk-nodig / fly / jump / swim / boat）`)
-      return { ...withOutcome(await sess.bot.walkTo(target, { budget: callBudget(args.budgetMs), noTower: args.allowTower !== true, noDig, intent: intentArgOf(args.intent), waterRecover: typeof args.waterRecover === 'boolean' ? args.waterRecover : undefined, xz: wantsXZ }), { expect: 'moved' }), ...aroundOf(sess) }
+      if (use !== 'walk') throw new Error(`未知 mode："${use}"（可用 walk / fly / jump / swim / boat）`)
+      /* 2026-10-25：走不通就自动改成「挖穿挡路的方块」再走一次（显式 `noDig:false` 除外）。 */
+      return { ...withOutcome(await walkWithAutoDig(sess, target, { noDig, noTower: args.allowTower !== true, intent: intentArgOf(args.intent), waterRecover: typeof args.waterRecover === 'boolean' ? args.waterRecover : undefined, xz: wantsXZ }, args.budgetMs, noDig === true), { expect: 'moved' }), ...aroundOf(sess) }
     },
   }))
 
@@ -3926,7 +3991,7 @@ export function apply(ctx, rawConfig) {
       + '· look 看向坐标或玩家(who)；要看方向/速度就加 track:1500 + samples（末影之眼指路）\n'
       + '· toward 看向并走近某个玩家(who)\n'
       + '· place 放方块 (x,y,z)；悬空先垫脚（=搭高）\n'
-      + '· bridge 搭路：朝 (x,y,z) 铺脚下一层；脚下悬空/区块没加载/血量<8 就停，岩浆与深空只警告\n'
+      + '· bridge 搭路：朝 (x,y,z) 铺脚下一层；加 slope:±1 就每格升降 1（搭楼梯）；脚下悬空/区块没加载/血量<8 就停，岩浆与深空只警告\n'
       + '· break 破坏 (x,y,z)：自动换对的工具\n'
       + '· use 用方块/实体(who)：门/按钮/拉杆/喂动物；都不给=用手上的\n'
       + '· useitem 用手上的东西：扔眼睛/雪球；**带 x/y/z 会先瞄准、停 450ms 再用**（舀水/骨粉/补种都带坐标）\n'
@@ -3949,6 +4014,7 @@ export function apply(ctx, rawConfig) {
       name: { type: 'string', description: '方块或物品名（place/equip/toss 用）' },
       to: { type: 'string', description: 'equip 装哪格：head/torso/legs/feet/off-hand；只给=脱掉' },
       count: { type: 'number', description: 'toss 丢几个（默认 1）/ farm 最多处理几格（默认 6，上限 16）' },
+      slope: { type: 'number', description: 'bridge：每格升降几格（0 平铺默认；1 往上搭阶梯，-1 往下）' },
       hold: { type: 'number', description: 'useitem 按住毫秒（拉弓 1000）' },
       approach: { type: 'boolean', description: 'toward 走近吗（默认 true）' },
       budgetMs: { type: 'number', description: 'toward/sleep/farm 的走动毫秒（默认 10000）' },
@@ -3990,7 +4056,7 @@ export function apply(ctx, rawConfig) {
         /* P0-2（用户 m02868）：搭路是**独立状态机** —— 每格"放一块 → 等服务端确认 → 才走"，任何一处
          * 对不上（脚下悬空 / 区块没加载 / 血量太低 / 回读没确认）立刻停，绝不继续往下铺；桥下有岩浆/火、或者下方是 >64 格深空 ⇒ **只警告不拦**（2026-10-22 用户要求），结果里带 warnings/risk。
          * `x/y/z` 是**终点那一格**（铺在脚下一层），方向与格数由 `bridgeDirTo()` 反推。 */
-        case 'bridge':  return withOutcome({ mode, ...(await bot.bridge({ x: args.x, y: args.y, z: args.z, name: args.name })) })
+        case 'bridge':  return withOutcome({ mode, ...(await bot.bridge({ x: args.x, y: args.y, z: args.z, name: args.name, slope: args.slope })) })
         case 'break':   return withOutcome({ mode, ...(await bot.breakBlock(args)) })
         case 'use': {
           // 没给坐标也没给 who ⇒ 不是"右键某个东西"，而是"用手上的东西"（对着空气用）
@@ -4093,7 +4159,9 @@ export function apply(ctx, rawConfig) {
     name: 'mc_shoot',
     description: '**射箭**：自动换弓、算弹道、拉满、放箭，射完报 12 格内身边有谁。\n'
       + '· 射水晶给 `x/y/z`；打龙 `who:"ender_dragon"`（自动瞄 +2.8 格）。\n'
-      + '· 落点误差 > 4 格会拒射并说明"太远/角度刁"，不瞎射。',
+      + '· 落点误差 > 4 格会拒射并说明"太远/角度刁"，不瞎射。'+
+      + '· 平射路径上有方块挡着（墙 / 台阶 / 树叶 / 地形）时**自动改高抛**越过去，'+
+      + '结果里 `lob:true`、`lobOver` 说清越过的是什么；都不通就说清打不着。',
     parameters: {
       who: { type: 'string', description: '目标实体名（如 ender_dragon）' },
       x: { type: 'number', description: '目标 x（整数格，射水晶/坐标用）' },
@@ -4340,6 +4408,9 @@ export function apply(ctx, rawConfig) {
       const lines = await sess.bot.dig({
         mode: args.mode === 'stair' ? 'stair' : 'block',
         dir: args.dir ? String(args.dir) : null,
+        /* 🔴 2026-10-25：stair 的目标高度必须单独传 —— 下面那个 pos 要求 x/y/z 齐全，
+         *   而说明里写的是"x/z 可选"，只给 y 时 pos 为 null（实机踩过）。 */
+        targetY: Number.isFinite(Number(args.y)) ? Number(args.y) : null,
         maxSteps: args.maxSteps,
         name: args.name ? String(args.name) : null, pos,
         /* 2026-10-23：默认搜索半径 16 → 8。16 格外的矿一律要被走过去，而"走过去"正是

@@ -133,9 +133,10 @@ export function dirNameOf (dx, dz) {
  * 桥面铺在 `脚 - 1` 那一层：站在 (x,y,z)、脚下方块是 (x,y-1,z)，
  * 往前一格要铺的是 (x+dx, y-1, z+dz) —— 铺完就能走上去。
  */
-export function bridgeCellsOf (feet, dir, count) {
+export function bridgeCellsOf (feet, dir, count, slope = 0) {
   const out = []
-  for (let i = 1; i <= count; i++) out.push({ x: feet.x + dir.dx * i, y: feet.y - 1, z: feet.z + dir.dz * i })
+  const s = Math.sign(Number(slope) || 0)
+  for (let i = 1; i <= count; i++) out.push({ x: feet.x + dir.dx * i, y: feet.y - 1 + s * i, z: feet.z + dir.dz * i })
   return out
 }
 
@@ -148,16 +149,21 @@ export function bridgeCellsOf (feet, dir, count) {
 export function bridgeDirTo (feet, { x, y, z } = {}) {
   const tx = Math.floor(Number(x)); const ty = Math.floor(Number(y)); const tz = Math.floor(Number(z))
   if (![tx, ty, tz].every(Number.isFinite)) throw new Error('mode:"bridge" 要给 x/y/z（铺到哪一格）')
-  if (ty !== feet.y - 1) {
-    throw new Error(`搭路只能铺在**脚下一层**：你站在 y=${feet.y}，目标 y 得是 ${feet.y - 1}（给的是 ${ty}）。`
-      + '要往上/往下搭是另一回事（先 mc_move 过去，或用 mc_build）。')
-  }
   const dx = tx - feet.x; const dz = tz - feet.z
   if (dx && dz) throw new Error(`搭路只走直线（现在要从 (${feet.x},${feet.z}) 到 (${tx},${tz})，x 和 z 都在变）——`
     + '拆成两段（先铺 x 再铺 z），或先 mc_move 走到同一行/列')
   if (!dx && !dz) throw new Error('目标就是脚下这一格，不用搭')
   const sx = Math.sign(dx); const sz = Math.sign(dz)
-  return { dir: { dx: sx, dz: sz, name: dirNameOf(sx, sz) }, count: Math.abs(dx) + Math.abs(dz) }
+  const count = Math.abs(dx) + Math.abs(dz)
+  /* 桥面默认铺在脚下一层（y-1）。目标 y 更高/更低 ⇒ 每格升/降 1 格（阶梯，2026-10-25 用户
+   * 「bridge 能不能再加搭阶梯，像挖 stair 那样的」）。只认「每格 ±1」：斜着一次跨两格够不着依附面。 */
+  const dy = ty - (feet.y - 1)
+  const slope = Math.sign(dy)
+  if (dy !== 0 && Math.abs(dy) !== count) {
+    throw new Error(`从脚下一层 y=${feet.y - 1} 铺到 y=${ty} 要升降 ${Math.abs(dy)} 格，但这段路只有 ${count} 格——`
+      + '搭阶梯只能**每格升降 1 格**（把目标 y 改成 ' + (feet.y - 1 + slope * count) + '，或者把距离改长）')
+  }
+  return { dir: { dx: sx, dz: sz, name: dirNameOf(sx, sz) }, count, slope }
 }
 
 /** 从 `pos` 往下数几个空格才踩到实地（`max` 之内没有就回 `null`） */
@@ -203,8 +209,8 @@ export function hazardIn (b, pos, depth = 6) {
  *
  * 返回 `{ ok, why, cells, drop, hazard, risk }`。`ok:false` 时 `why` 是要给模型看的人话。
  */
-export function bridgeSafetyOf (b, { feet, dir, count = 1, item = null, need = 1, minHealth = BRIDGE_MIN_HEALTH } = {}) {
-  const cells = bridgeCellsOf(feet, dir, count)
+export function bridgeSafetyOf (b, { feet, dir, count = 1, slope = 0, item = null, need = 1, minHealth = BRIDGE_MIN_HEALTH } = {}) {
+  const cells = bridgeCellsOf(feet, dir, count, slope)
   const health = Number(b?.health)
   if (Number.isFinite(health) && health < minHealth) {
     return { ok: false, why: `血量只有 ${health}（低于 ${minHealth}）——搭桥是悬空作业，摔下去就没了，先回血再搭`, cells }
@@ -241,7 +247,8 @@ export function bridgeSafetyOf (b, { feet, dir, count = 1, item = null, need = 1
     }
     if (probe.drop > worstDrop) worstDrop = probe.drop
   }
-  if (worstDrop >= BRIDGE_DEEP && !risk) risk = `桥下最深 ${worstDrop} 格是空的（悬空作业，摔下去会掉血）`
+  /* 阶梯（slope ≠ 0）时「桥面下方是空的」是故意的 —— 下面就是下一级台阶，不该当风险报。 */
+  if (worstDrop >= BRIDGE_DEEP && !risk && !Math.sign(Number(slope) || 0)) risk = `桥下最深 ${worstDrop} 格是空的（悬空作业，摔下去会掉血）`
   if (bottomless) risk = `桥下 ${DROP_SCAN} 格内都没到底（真·悬空长廊，掉下去基本没救${worstDrop > DROP_SCAN ? '；最深落差已超过扫描深度' : ''}）` + (risk ? `；另外${risk}` : '')
   if (hazards.length > 0) {
     const h0 = hazards[0]
@@ -281,12 +288,13 @@ export function feetOf (b) {
  * 返回 `{ ok, placed, walked, stopped, why, ... }`。
  * `stopped:true` + `why` 是**正常的收场方式**（用户要的就是"不行就停在这儿说清楚"）。
  */
-async function bridgeAcrossInner (self, { dir, count = 1, name = null, minHealth = BRIDGE_MIN_HEALTH, x = null, y = null, z = null } = {}, ctx = {}) {
+async function bridgeAcrossInner (self, { dir, count = 1, name = null, minHealth = BRIDGE_MIN_HEALTH, x = null, y = null, z = null, slope = 0 } = {}, ctx = {}) {
   const b = self.requireBot()
   const start = feetOf(b)
   /* 方向/格数：给了 dir 就用它；否则从目标格 (x,y,z) 反推（`mc_act{mode:"bridge"}` 走这条）。 */
   let d = null
   let n = 0
+  let sl = Math.sign(Number(slope) || 0)
   if (dir != null) {
     d = typeof dir === 'string' ? dirOf(dir) : dir
     if (!d) throw new Error(`dir 认不出来（给了 ${JSON.stringify(dir)}）——用 north/south/east/west 或 +x/-x/+z/-z`)
@@ -294,6 +302,7 @@ async function bridgeAcrossInner (self, { dir, count = 1, name = null, minHealth
   } else {
     const derived = bridgeDirTo(start, { x, y, z })
     d = derived.dir
+    sl = derived.slope
     n = Math.max(1, Math.min(derived.count, BRIDGE_MAX))
     if (derived.count > BRIDGE_MAX) {
       throw new Error(`要铺 ${derived.count} 格，超过单次上限 ${BRIDGE_MAX}——分几次铺（第一次铺完再叫一次，铺好的会跳过）`)
@@ -309,8 +318,8 @@ async function bridgeAcrossInner (self, { dir, count = 1, name = null, minHealth
       : '背包里没有能当搭路料的整方块（火把/门/半砖放下去站不住）——先 mc_dig 挖点土或圆石')
   }
 
-  const plan = bridgeCellsOf(start, d, n)
-  const safety = bridgeSafetyOf(b, { feet: start, dir: d, count: n, item, need: n, minHealth })
+  const plan = bridgeCellsOf(start, d, n, sl)
+  const safety = bridgeSafetyOf(b, { feet: start, dir: d, count: n, slope: sl, item, need: n, minHealth })
   if (!safety.ok) {
     return {
       ok: false, stopped: true, why: safety.why, dir: d.name, count: n,
@@ -428,7 +437,7 @@ async function bridgeAcrossInner (self, { dir, count = 1, name = null, minHealth
   const end = feetOf(b)
   const held = heldText(b)
   return {
-    ok: true, dir: d.name, count: n, from: start, to: end,
+    ok: true, dir: d.name, count: n, ...(sl ? { slope: sl } : {}), from: start, to: end,
     placed: placed.length, walked,
     ...(placed.length ? { placedAt: placed.slice(0, 8) } : {}),
     ...(skipped.length ? { skipped: skipped.length, skippedWhy: `这 ${skipped.length} 格本来就有方块（不是空档），没重铺：${skipped.slice(0, 3).join('、')}` } : {}),

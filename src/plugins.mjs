@@ -413,6 +413,11 @@ export async function setupPathfinder (self, { spec = null } = {}) {
      *   于是"叫了 move、人就站着不动 10 秒"。改 3500ms：超时返回的是
      *   `reconstructPath(bestNode)`（**半截路也照样能走**），先走起来比想满更划算。
      *   真需要长考的目标由脱困阶梯重试，而不是一次性把整轮预算烧在算路上。 */
+    /* 🔴 2026-10-25 用户（「搭路是蹲着到方块边缘放，其实站在前一格就能直接放」）：
+     *    vendor `moveToEdge()` 在放方块前会 `sneak + back` 把自己挪到方块边缘
+     *    （每块多花约 1 秒，还容易把自己挤下边缘）。我们不需要那个姿态：
+     *    站在当前格时相邻格就在 1.4 格内，脚下是实地就不会掉。关掉。 */
+    b.pathfinder.sneakWhenPlacing = false
     b.pathfinder.thinkTimeout = Number(self.cfg.pfThinkTimeoutMs ?? 3500)
     b.pathfinder.tickTimeout = 40
     b.pathfinder.searchRadius = Number(self.cfg.pfSearchRadius ?? 192)

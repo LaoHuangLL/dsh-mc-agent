@@ -533,5 +533,31 @@ section('⑧ 铺完把手换回来：之前的武器/镐子，所有返回路径
   }
 }
 
+section('⑧ 搭阶梯：slope = ±1（2026-10-25 用户「bridge 能不能再加搭阶梯，像挖 stair 那样的」）')
+{
+  const feet = { x: 0, y: 70, z: 0 }
+  const d = dirOf('north')
+  const flat = bridgeCellsOf(feet, d, 3, 0)
+  ok(flat.every((c) => c.y === 69), 'slope 0 ⇒ 还是平铺在脚下一层', JSON.stringify(flat))
+  const down = bridgeCellsOf(feet, d, 3, -1)
+  ok(down[0].y === 68 && down[1].y === 67 && down[2].y === 66, 'slope -1 ⇒ 每格降 1（往下搭楼梯）', JSON.stringify(down))
+  const up = bridgeCellsOf(feet, d, 2, 1)
+  ok(up[0].y === 70 && up[1].y === 71, 'slope +1 ⇒ 每格升 1（往上搭楼梯）', JSON.stringify(up))
+
+  const r1 = bridgeDirTo(feet, { x: 0, y: 66, z: -3 })
+  ok(r1.count === 3 && r1.slope === -1, '给终点 y 低 3 格 ⇒ 自动算出 slope:-1', JSON.stringify(r1))
+  const r2 = bridgeDirTo(feet, { x: 0, y: 71, z: -2 })
+  ok(r2.count === 2 && r2.slope === 1, '给终点 y 高 2 格 ⇒ slope:+1', JSON.stringify(r2))
+  let err = ''
+  try { bridgeDirTo(feet, { x: 0, y: 60, z: -3 }) } catch (e) { err = e.message }
+  ok(/每格升降 1 格/.test(err), '升降幅度和距离不齐 ⇒ 明确报错（不瞎猜）', err)
+
+  const src = read('../src/bridge.mjs')
+  ok(/bridgeCellsOf \(feet, dir, count, slope = 0\)/.test(src), 'bridgeCellsOf 接收 slope')
+  ok(/bridgeSafetyOf \(b, \{ feet, dir, count = 1, slope = 0/.test(src), 'bridgeSafetyOf 接收 slope')
+  const idx = read('../index.js')
+  ok(/slope: \{ type: 'number'/.test(idx) && /slope: args\.slope/.test(idx), 'mc_act 有 slope 参数并透传给 bot.bridge')
+}
+
 console.log(`check-bridge：pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)

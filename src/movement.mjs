@@ -2574,6 +2574,44 @@ export function portalAt (b, x, y, z, r = 1) {
   return best ? { name: best.name, x: best.x, y: best.y, z: best.z } : null
 }
 
+/**
+ * 目标附近有**末地传送门框架**、目标格却不是传送门方块 ⇒ 门没激活、或被方块填住了
+ * （实机常见：以前自动垫柱子把 cobblestone 放进 3×3 内部，人怎么走都进不去）。
+ * 返回一句能直接照做的话；门是通的 / 附近压根没框架 ⇒ null。
+ */
+export function portalBlockedHint (b, x, y, z, r = 2) {
+  const cx = Math.floor(Number(x))
+  const cy = Math.floor(Number(y))
+  const cz = Math.floor(Number(z))
+  if (![cx, cy, cz].every(Number.isFinite)) return null
+  const at = (px, py, pz) => { try { return b.blockAt(new Vec3(px, py, pz))?.name ?? null } catch { return null } }
+  const here = at(cx, cy, cz)
+  if (here && PORTAL_RE.test(here)) return null
+  let frames = 0
+  for (let dx = -r; dx <= r; dx++) {
+    for (let dz = -r; dz <= r; dz++) {
+      for (const dy of [0, 1, -1]) {
+        const n = at(cx + dx, cy + dy, cz + dz)
+        if (n === 'end_portal_frame') frames++
+        else if (n && PORTAL_RE.test(n)) return null      // 门是通的，不关我事
+      }
+    }
+  }
+  if (frames < 3) return null
+  const junk = []
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      for (const dy of [0, 1]) {
+        const n = at(cx + dx, cy + dy, cz + dz)
+        if (!n || n === 'air' || n === 'cave_air' || n === 'end_portal_frame' || PORTAL_RE.test(n)) continue
+        junk.push(`${n}(${cx + dx},${cy + dy},${cz + dz})`)
+      }
+    }
+  }
+  return `🔴 附近有**末地传送门框架**，但目标那一格不是传送门方块 —— 门没激活，或被方块填住了${junk.length ? `：${junk.slice(0, 6).join('、')}` : ''}。`
+    + '先用 `mc_dig` 把门里（3×3 内部）那几格挖空、框架别动，再 `mc_move` 到门方块那一格。'
+}
+
 /** 人现在是不是已经站在传送门里（脚内/头内那格是传送门）。 */
 export function inPortalNow (b) {
   const p = b?.entity?.position
@@ -2604,22 +2642,38 @@ export async function stepIntoPortal (b, cell, { ms = 700, signal = null, moveGe
     return p0.distanceTo(p1) > 8
   }
   if (inPortalNow(b) || teleported()) return { entered: true, already: true }
+  const gen0 = moveGenOf ? moveGenOf() : null   // 同上：bot 上没有 _moveGen
   /* 🔴 2026-10-20 审计：这里原来没带 `force=true` —— mineflayer 的 `lookAt` 不带 force 会
    *   `await lookingTask.promise`，那个 promise 只在物理循环发出 look 包时 finish；站着不动时
-   *   物理循环 early return（physics.js:158-162）⇒ **永远挂着**，下面"照样顶"的分支根本走不到。 */
-  try { await b.lookAt(new Vec3(cell.x + 0.5, b.entity.position.y + 1.1, cell.z + 0.5), true) } catch { /* 转不过去也照样顶 */ }
-  /* 🔴 2026-10-23 审计（A[5]）：同样补上 `_moveGen` 守卫 —— 传送那一下如果被接管，
-   *    醒来无条件松 forward/sprint 会踩掉接管者的控制位。 */
-  const gen0 = moveGenOf ? moveGenOf() : null   // 同上：bot 上没有 _moveGen
-  try {
-    b.setControlState('forward', true)
-    b.setControlState('sprint', true)
-    await raceAbort(sleep(ms), signal, '走进传送门')
-  } catch { /* 被打断就把控制位松开 */ } finally {
-    if (!moveGenOf || moveGenOf() === gen0) {
-      try { b.setControlState('forward', false); b.setControlState('sprint', false) } catch { /* 忽略 */ }
-    }
+   *   物理循环 early return（physics.js:158-158）⇒ **永远挂着**。 */
+  /* 🔴 2026-10-25 实机（「还是走不进末地传送门」）：实测人常常站在**框架顶上**（比门高一格），
+   *   这时水平瞄过去只会贴着框架边沿原地蹭。往下瞄到门格中心才走得下去。 */
+  const eyeY = (b?.entity?.position?.y ?? 0) + (b?.entity?.eyeHeight ?? 1.62)
+  const aimY = Math.min(Number(cell.y) + 0.5, eyeY - 0.2)
+  try { await b.lookAt(new Vec3(cell.x + 0.5, aimY, cell.z + 0.5), true) } catch { /* 转不过去也照样顶 */ }
+  const release = () => {
+    if (moveGenOf && moveGenOf() !== gen0) return   // 被接管了：别踩掉接管者的控制位
+    try { b.setControlState('forward', false) } catch { /* 忽略 */ }
+    try { b.setControlState('sprint', false) } catch { /* 忽略 */ }
+    try { b.setControlState('jump', false) } catch { /* 忽略 */ }
   }
+  /* 两段：先正常走进去；没进就跳一下再走（框架挡脚 / 门在上一层时只靠 forward 进不去）。 */
+  const attempts = [{ ms: Math.min(ms, 700), jump: false }, { ms: 450, jump: true }]
+  for (const a of attempts) {
+    if (teleported()) break
+    try {
+      b.setControlState('forward', true)
+      b.setControlState('sprint', true)
+      if (a.jump) b.setControlState('jump', true)
+      /* 🔴 2026-10-25：预算见底时 `signal` 已经 abort，`raceAbort` 会立刻抛 ⇒ 700ms 变成 0，
+       *   人一动不动就报"没进去"，模型只好再叫一次（实机就是这样反复）。最后一哆嗦不吃打断，
+       *   至少给 300ms。 */
+      if (signal?.aborted === true) await sleep(Math.min(a.ms, 300))
+      else await raceAbort(sleep(a.ms), signal, '走进传送门')
+    } catch { /* 被打断也继续走下一段 */ }
+    try { b.setControlState('jump', false) } catch { /* 忽略 */ }
+  }
+  release()
   return { entered: teleported() || Boolean(inPortalNow(b)) }
 }
 
@@ -2727,8 +2781,13 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
    *    `GoalNear(…, max(0, round(arrive-0.6)))` 默认半径 1，人在门外 1 格就满足 ⇒
    *    "到了但没进去"。目标（或它旁边）是传送门时把半径收到 **0**（必须站在那一格上），
    *    并在到了之后补一步"迈进去"（`stepIntoPortal`）。 */
-  /* xz 目标不判传送门：门是"站到某一格上"，那是三维精确目标（给 x/y/z 时才有意义）。 */
-  const portal = xz ? null : portalAt(b, Math.floor(target.x), ty, Math.floor(target.z))
+  /* 🔴 2026-10-25 实机（用户：「还是走不进末地传送门」）：原来这里只要目标是 xz 就直接把 portal 置空，
+   *    **只给 x/z 就完全不判传送门**（原写法把 portal 直接置 null）—— `GoalXZ` 到那一列就报"到了"，那最后一步永远不迈，
+   *    人站在门外发呆，看着像"门进不去"。门就是"站到某一格上"，xz 也给个 y 探针：
+   *    拿自己脚下的 y（xz 分支的 `ty` 是 undefined），半径放到 2 覆盖上下一层。 */
+  const portalProbeY = Number.isFinite(Number(ty)) ? Number(ty) : (b?.entity?.position?.y ?? 0)
+  const portal = portalAt(b, Math.floor(target.x), portalProbeY, Math.floor(target.z), xz ? 2 : 1)
+  const portalBlocked = portal ? null : portalBlockedHint(b, Math.floor(target.x), portalProbeY, Math.floor(target.z))
   let gp = goalPointFor({ target: { x: sp.x, z: sp.z }, ty, arriveUsed, portal })
   /* 🔴 2026-10-22 用户第二条的另一半：`GoalNear` 半径默认 1 格是**三维球**，
    *    人站在半格里（起点被算作 y 下层）时起点本身就在球内 ⇒ A* 一步不走就报"到了"
@@ -2748,7 +2807,8 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
    *    原来全仓只有 `GoalNear` 一种 goal ⇒ AI 想"去那一带"必须编一个 y，
    *    编高了 A* 就老老实实垫方块往上爬（"搭路搭到空气里"），编低了就 `NoPath`。
    *    `GoalXZ` 让"到那一列"本身就是目标，y 由 pathfinder 自己决定怎么下去/怎么上去。 */
-  const GoalXZ = xz ? goals?.GoalXZ : null
+  /* 命中传送门时不能再用 GoalXZ（它只锁水平两维）—— 得升级成三维精确格，人才能站进去。 */
+  const GoalXZ = (xz && !gp.portal) ? goals?.GoalXZ : null
   const goal = GoalXZ
     ? new GoalXZ(gp.x, gp.z)
     : new goals.GoalNear(gp.x, gp.y, gp.z, xz ? 0 : gp.radius)
@@ -3168,8 +3228,8 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
            *   · 该不该动手看**眼前障碍**（`obstacleAheadOf`），不是"离终点还剩几格" ——
            *     目标在 20 格外的台阶，照样卡在眼前这一格上。
            * 挖到了就重跑同一个 `goto`（不算一级脱困）。 */
-          /* `!noDig`：`mc_move {noDig:true}` / `mode:"walk-nodig"` 是用户点名的
-           * "不破坏方块"模式 —— 卡死也不许挖，宁可报 `blockedAhead` 让 AI 自己决定绕路。 */
+          /* `!noDig`：`mc_move {noDig:true}`（默认）是用户点名的"不破坏方块"模式 ——
+           * 卡死也不许挖，宁可报 `blockedAhead` 让 AI 自己决定绕路。 */
           const carveAllowed = !noDig && ctx.cfg?.walkCanDig !== false && ctx.cfg?.walkCarveStep !== false
           /* 卡住时先按一下门（2026-10-18 实机：门关着，寻路不认 ⇒ 停 8 秒）。
            * 便宜、只读、无副作用：附近没有门就是一个空扫描。 */
@@ -3382,7 +3442,7 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
           reason: emptyNoPath ? 'NoPath' : 'goal-reached-elsewhere',
           ...roadInfo(), ...moveInfo(), ...fellInfo(end),
           hint: emptyNoPath
-            ? `${fellNote(end)}寻路**没路可走**（被墙 / 水 / 悬崖挡住，或目标在实心方块里）：离目标还有 ${left.toFixed(1)} 格。`
+            ? `${fellNote(end)}寻路**没路可走**（被墙 / 水 / 悬崖挡住，或目标在实心方块里）：离目标还有 ${left.toFixed(1)} 格。${portalBlocked ? ' ' + portalBlocked : ''}`
               + '先 `mc_scan` 看挡路的是什么：是方块就 `mc_act{mode:"break"}` 挖开；'
               + '**是沟/缺口就 `mc_act{mode:"bridge"}`**（寻路插件不会水平搭桥，只会报没路）——'
               + '朝对岸那一格铺过去（x/y/z 给对岸**脚下一层**的坐标）。换个目标点再叫 mc_move 也一样走不通。'
@@ -3395,7 +3455,7 @@ export async function walkPathfinder (self, target, { arrive = 1.6, budget = sel
         remaining: Number(left.toFixed(2)),
         ...deltaOf(end),
         via: 'pathfinder', stuck: true, reason: 'goal_reached-but-far', ...moveInfo(), ...fellInfo(end),
-        hint: `${fellNote(end)}寻路插件说到了，但离目标还有 ${left.toFixed(1)} 格（可能被占住或只到附近）—— 再走一次，或换个目标点。`,
+        hint: `${fellNote(end)}寻路插件说到了，但离目标还有 ${left.toFixed(1)} 格（可能被占住或只到附近）—— 再走一次，或换个目标点。${portalBlocked ? ' ' + portalBlocked : ''}`,
       }
     }
     /* 🔴 2026-10-19：目标（或旁边）是**传送门**时，"站在那一格上"还不算完 ——

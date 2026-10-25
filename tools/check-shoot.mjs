@@ -36,7 +36,7 @@ const throws = async (p, re, label) => {
 }
 
 /** 假 bot：只实现 shoot 真正碰到的那几个接口（其余一律没有 ⇒ 用了就会炸，正好当"越界"探针） */
-const makeBot = ({ items = [], gameMode = 'survival', consumeArrow = true, equipWorks = true, consumeDelayMs = 0, held = null } = {}) => {
+const makeBot = ({ items = [], gameMode = 'survival', consumeArrow = true, equipWorks = true, consumeDelayMs = 0, held = null, blockAt = null, world = null } = {}) => {
   const log = []
   const inv = items.map(([name, count]) => ({ name, count }))
   const bot = {
@@ -68,7 +68,8 @@ const makeBot = ({ items = [], gameMode = 'survival', consumeArrow = true, equip
       if (consumeDelayMs > 0) setTimeout(eat, consumeDelayMs)   // 服务端回包慢：箭数过一会儿才掉
       else eat()
     },
-    blockAt: (pos) => ({ name: pos && pos.y > 100 ? 'stone' : 'air' }),
+    blockAt: blockAt ?? ((pos) => ({ name: pos && pos.y > 100 ? 'stone' : 'air' })),
+    world: world ?? { raycast: () => null },
     __log: log,
     __inv: inv,
   }
@@ -539,9 +540,27 @@ section('⑩ 高抛解不吃：仰角 > 45° 改用平射解（用户 2026-10-19
   const { readFile } = await import('node:fs/promises')
   const src = await readFile(new URL('../src/shoot.mjs', import.meta.url), 'utf8')
   ok(/const gdeg = Math\.abs\(Number\(grade\.pitch\) \|\| 0\) \* 180 \/ Math\.PI/.test(src), 'gradeOf 把 hawkeye 的仰角换成度数')
-  ok(/if \(gdeg <= LOW_ARC_MAX_DEG\) return grade/.test(src), '平射解（≤45°）直接采用')
+  ok(/if \(gdeg <= LOW_ARC_MAX_DEG\) return polish\(grade, aimed, speed\)/.test(src), '平射解（≤45°）直接采用（再过一道遮挡闸）')
   ok(/fallbackGrade\(aimed, speed, \{ preferLow: true \}\)/.test(src), '高抛解时改用 preferLow 的兜底解')
-  ok(/solveArrowLead\(\{ from, to, vel: speed, speed: arrowSpeedFor\(estDrawMs\), preferLow \}\)/.test(src), 'preferLow 透传给 solveArrowLead')
+  ok(/solveArrowLead\(\{ from, to, vel: speed, speed: spd0, preferLow \}\)/.test(src), 'preferLow 透传给 solveArrowLead')
+  /* 2026-10-25 用户「现在弓箭只会平射，不会抛射」：遮挡检测 + 换高抛 */
+  ok(/const blockedAlong = \(pitch, yaw, to, speed\) =>/.test(src), '有沿弹道采样查方块的 blockedAlong')
+  ok(/blk\.boundingBox === 'block'/.test(src), '只把实心方块当挡（水/草/火把能穿）')
+  /* 🔴 2026-10-26 实机「打末影水晶还是只能用平射」：读不到一格就 `return unknown` ⇒ 远处区块没加载时
+     等于永远查不出挡。现在记一笔继续采样，一路都读不到才算不知道。 */
+  ok(/if \(!blk\) \{ unknown = true; return null \}/.test(src), '读不到区块：记一笔、这一格不算挡，外层继续往后采样（别一格未知就放过整条轨迹）')
+  ok(/return unknown \? \{ name: null, unknown: true \} : null/.test(src), '一路都读不到才算不知道（不知道 ≠ 挡）')
+  ok(/if \(d < 0\.6\) return null/.test(src), '只跳过自己那一格（0.6），贴脸的墙不再漏检')
+  ok(/const seg = Math\.hypot\(p\.x - px, p\.y - py, p\.z - pz\)/.test(src), '🔴 一 tick 走 3 格：沿段内插值采样（不然 1 格厚的柱子被整段跨过）')
+  ok(/Math\.ceil\(seg \/ 0\.4\)/.test(src), '插值步长 ≤ 0.4 格')
+  ok(/const blk = toV \? blockedAlong\(low\.pitch, low\.yaw, toV, arrowSpeedFor\(estDrawMs\)\) : null/.test(src),
+    '🔴 「优先平射」降级前先查这条平射通不通（水晶在柱顶，平射撞柱子）')
+  ok(/const toV = aimP \? new Vec3\(aimP\.x, aimP\.y \+ Number\(aimed\?\.height \?\? 0\), aimP\.z\) : null/.test(src),
+    '🔴 预检自己算瞄准点（`to` 在该作用域不存在，实机报过 `to is not defined`）')
+  ok(!/blockedAlong\(low\.pitch, low\.yaw, to,/.test(src), '别再用未定义的 `to`')
+  ok(/const alt = fallbackGrade\(aimed, speed, \{ clearOf: true \}\)/.test(src), '被挡时换 clearOf 的抛射解')
+  ok(/lob: Math\.abs\(c\.deg\) > 10/.test(src), '仰角 >10° 标成 lob（抛射）')
+  ok(/if \(!hit \|\| hit\.unknown\) return g/.test(src), '没挡/不知道 ⇒ 用原解')
 }
 
 /* ───────── ⑲ 打龙的两道实机闸：落地免疫投射物 / 默认 25 格射程（2026-10-20） ───────── */
@@ -582,6 +601,69 @@ section('⑲ 末影龙：落地免疫投射物 + 默认射程 25 格')
   bz.entities = { 1: { name: 'zombie', position: new Vec3(0, 64, 40), height: 1.8 } }
   const rz = await shoot(bz, { who: 'zombie', count: 1 }, ctxOf(() => GRADE))
   ok(rz.fired === 1, '僵尸 40 格：自动闸只管龙，不管别的目标', JSON.stringify(rz.fired))
+}
+
+/* ────────────────────────── ⑱ 平射被墙挡住 ⇒ 自动改抛射（用户 2026-10-25） ────────────────────────── */
+section('⑱ 平射撞墙 ⇒ 换高抛（真 hawkeye + 假方块世界）')
+{
+  /* 假世界：z=8~10、y=64~68 立一堵墙，正好挡在 20 格目标的平射线上 */
+  const wall = (pos) => {
+    if (!pos) return { name: 'air', boundingBox: 'empty' }
+    if (pos.z >= 8 && pos.z <= 10 && pos.y >= 64 && pos.y <= 68) return { name: 'stone', boundingBox: 'block' }
+    return { name: 'air', boundingBox: 'empty' }
+  }
+  const mkZombie = (b) => {
+    b.entities = { 1: { id: 1, name: 'zombie', displayName: 'Zombie', height: 1.95, isValid: true, metadata: {}, position: new Vec3(0, 64, 20) } }
+    return b
+  }
+  {
+    const b = mkZombie(makeBot({ items: [['bow', 1], ['arrow', 10]], blockAt: wall }))
+    const r = await shoot(b, { who: 'zombie', waitTime: 5 }, ctxOf(undefined))
+    const s0 = r.shots[0] ?? {}
+    ok(s0.lob === true, '平射被挡 ⇒ 这一箭改抛射（lob:true）', JSON.stringify(s0))
+    ok(s0.lobOver === 'stone', '结果里说清越过的是什么方块', String(s0.lobOver))
+    ok(Math.abs(Number(s0.pitchDeg) || 0) > 10, '抛射的仰角 > 10°', String(s0.pitchDeg))
+    ok(s0.blockedBy === undefined, '改抛射后不再报 blockedBy')
+  }
+  {
+    /* 没有墙：还是平射（别把抛射当默认） */
+    const b = mkZombie(makeBot({ items: [['bow', 1], ['arrow', 10]] }))
+    const r = await shoot(b, { who: 'zombie', waitTime: 5 }, ctxOf(undefined))
+    const s0 = r.shots[0] ?? {}
+    ok(s0.lob === undefined && s0.lobOver === undefined, '没遮挡 ⇒ 不抛射（老行为不变）', JSON.stringify(s0))
+    ok(Math.abs(Number(s0.pitchDeg) || 0) <= 10, '没遮挡 ⇒ 平射（|pitch| ≤ 10°）', String(s0.pitchDeg))
+  }
+}
+
+
+/* ── ⑲ 目标在高处（水晶在柱顶）+ 平射被柱子挡 ⇒ 必须抛射（2026-10-26 实机） ── */
+section('⑲ 打高处目标（柱顶）：平射撞柱子 ⇒ 抛射')
+{
+  const world = (pos) => {
+    if (!pos) return { name: 'air', boundingBox: 'empty' }
+    if (pos.x === 0 && pos.z >= 6 && pos.z <= 7 && pos.y >= 64 && pos.y <= 71) return { name: 'obsidian', boundingBox: 'block' }
+    return { name: 'air', boundingBox: 'empty' }
+  }
+  const b = makeBot({ items: [['bow', 1], ['arrow', 10]], blockAt: world })
+  b.entities = { 1: { id: 1, name: 'zombie', displayName: 'Zombie', height: 1.95, isValid: true, metadata: {}, position: new Vec3(0, 73, 20) } }
+  const r = await shoot(b, { who: 'zombie', waitTime: 5 }, ctxOf(undefined))
+  const s0 = r.shots[0] ?? {}
+  ok(s0.lob === true, '柱顶目标 ⇒ 抛射（lob:true），不是平射', JSON.stringify(s0))
+  ok(Math.abs(Number(s0.pitchDeg) || 0) > 10, '仰角 > 10°', String(s0.pitchDeg))
+  ok(Number(s0.aimError) <= 1.5, '落点误差仍然可接受', String(s0.aimError))
+}
+
+/* ── ⑳ 实机原样：{aim:35, who:"end_crystal"} 曾报 `to is not defined` ── */
+section('⑳ 带 aim 抬高打高处目标：不再抛 to is not defined')
+{
+  const b = makeBot({ items: [['bow', 1], ['arrow', 10]], blockAt: () => ({ name: 'air', boundingBox: 'empty' }) })
+  b.entities = { 2: { id: 2, name: 'end_crystal', displayName: 'End Crystal', height: 2, isValid: true, metadata: {}, position: new Vec3(0, 90, 20) } }
+  let out = null
+  let err = null
+  try { out = await shoot(b, { who: 'end_crystal', aim: 35, waitTime: 5 }, ctxOf(undefined)) } catch (e) { err = e }
+  ok(!err, 'aim:35 + 高处目标不再抛错', String(err?.message))
+  ok(Array.isArray(out?.shots), '照常返回射击记录', JSON.stringify(out)?.slice(0, 80))
+  ok(/crystal/i.test(String(out?.target?.name ?? '')), '认得出末影水晶这个目标', String(out?.target?.name))
 }
 
 console.log(`\n${fail ? '❌' : '✅'} ${pass} 通过 / ${fail} 失败`)

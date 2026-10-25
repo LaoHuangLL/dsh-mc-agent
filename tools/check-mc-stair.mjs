@@ -31,12 +31,12 @@ ok(STAIR_MAX_STEPS === 64, '默认最多 64 步')
 ok(STAIR_STEP_MS === 3000, '每走一格最多 3 秒')
 ok(/export const STAIR_MAX_STEPS/.test(mvSrc), '常量有导出（测试能拿到）')
 
-section('2. 几何：往下挖 3 格 / 往上挖 2 格')
-ok(/const cells = up/.test(mvSrc) && /\? \[\{ x: fx, y: fy, z: fz \}, \{ x: fx, y: fy \+ 1, z: fz \}\]/.test(mvSrc),
-  '往上只挖两格：fy / fy+1（脚下 fy-1 是天然台阶）')
-ok(/\{ x: fx, y: fy \+ 2, z: fz \}\]/.test(mvSrc), '往下仍挖三格：fy / fy+1 / fy+2（走过去时身体还占 cur.y）')
+section('2. 几何：上下都挖 3 格（fy / fy+1 / fy+2）')
+ok(/const cells = \[fy, fy \+ 1, fy \+ 2\]\.map\(/.test(mvSrc),
+  '上下同一套：fy / fy+1 / fy+2 三格（2026-10-25 用户「stair往上挖也是挖3格」）')
+ok(!/const cells = up/.test(mvSrc), '不再按方向分两套格数')
 ok(/const fy = up \? cur\.y \+ 1 : cur\.y - 1/.test(mvSrc), '每步升/降 1 格（没有平台步）')
-ok(/const up = start\.y < targetY/.test(mvSrc) && /if \(up \? cur\.y >= targetY : cur\.y <= targetY\)/.test(mvSrc), '目标更高就是上升阶梯（循环按方向判完成）')
+ok(/const up = start\.y < ty/.test(mvSrc) && /if \(up \? cur\.y >= ty : cur\.y <= ty\)/.test(mvSrc), '目标更高就是上升阶梯（循环按方向判完成）')
 ok(/if \(isAir\(floor\.name\)\) \{ reason = 'no-floor'; break \}/.test(mvSrc), '脚下是空就停（不往深洞挖）')
 ok(/names\.some\(\(n\) => isLiquid\(n\)\)/.test(mvSrc), '三格里任何一格是液体就停')
 
@@ -80,21 +80,31 @@ const bot = (x, y, z, yaw = 0) => ({ entity: { position: { x, y, z }, yaw } })
 }
 
 section('5. dig() 转调')
-ok(/if \(mode === 'stair'\) return await digStair\(self, \{ pos, dir, maxSteps, budgetMs \}, ctx\)/.test(mvSrc),
-  'dig() 在 requireBot 之前就转调 digStair')
-ok(/mode = 'block', dir = null, maxSteps = STAIR_MAX_STEPS, budgetMs = 10_000,/.test(mvSrc), 'dig() 参数表有 mode/dir/maxSteps/budgetMs')
+ok(/if \(mode === 'stair'\) return await digStair\(self, \{ pos, dir, targetY, maxSteps, budgetMs \}, ctx\)/.test(mvSrc),
+  'dig() 在 requireBot 之前就转调 digStair（targetY 一起传）')
+ok(/mode = 'block', dir = null, targetY = null, maxSteps = STAIR_MAX_STEPS, budgetMs = 10_000,/.test(mvSrc),
+  'dig() 参数表有 mode/dir/targetY/maxSteps/budgetMs')
 ok(/export async function digStair \(self, \{/.test(mvSrc), 'digStair 有导出')
 
 section('6. 早退与报错')
 ok(/已经在 y=\$\{start\.y\}/.test(mvSrc), '已经比目标低就直接说不用挖')
 ok(/挖阶梯要知道挖到哪一层/.test(mvSrc), '不给 y 时报清楚的错')
 ok(/算不出往哪挖/.test(mvSrc), '算不出方向时报清楚的错')
+/* 🔴 2026-10-25 实机 bug：说明写「x/z 可选」，但 index.js 只在 x/y/z 齐全时才组 pos，
+ *   于是 `mc_dig {mode:"stair", y:50, dir:"z+"}` 一路报「给 y」——用户明明给了。 */
+ok(/const ty = Number\.isFinite\(Number\(targetY\)\) \? Math\.floor\(Number\(targetY\)\)/.test(mvSrc),
+  '目标高度优先取 targetY（只给 y 也能用，不需要 x/z）')
+ok(/pos && Number\.isFinite\(pos\.y\) \? Math\.floor\(pos\.y\) : null/.test(mvSrc),
+  'targetY 没给时退回 pos.y（老写法照样能用）')
+ok(/targetY = null, maxSteps = STAIR_MAX_STEPS/.test(mvSrc), 'digStair 参数表有 targetY')
 
 section('7. mc_dig 工具面')
 ok(/mode: \{ type: 'string', description: 'block（默认，挖方块）\/ stair（挖阶梯/.test(idxSrc), 'mc_dig 暴露 mode')
 ok(/dir: \{ type: 'string', description: 'stair 专用/.test(idxSrc), 'mc_dig 暴露 dir')
 ok(/maxSteps: \{ type: 'number', description: 'stair 专用/.test(idxSrc), 'mc_dig 暴露 maxSteps')
 ok(/mode: args\.mode === 'stair' \? 'stair' : 'block',/.test(idxSrc), 'execute 把 mode 传下去')
+ok(/targetY: Number\.isFinite\(Number\(args\.y\)\) \? Number\(args\.y\) : null,/.test(idxSrc),
+  'execute 把 y 作为 targetY 单独传下去（不受 pos 三坐标齐全的限制）')
 ok(/别指望 mc_move 挖竖井/.test(idxSrc), '描述里点明 move 不再挖竖井')
 ok(/目标 y 比现在低就是往下挖、高就是往上挖/.test(idxSrc), '描述里点明 stair 双向（上/下）')
 

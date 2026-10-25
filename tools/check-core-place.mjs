@@ -445,5 +445,71 @@ section('⑨ 跳起放置有上限（placeBlock 不回包也要按时放弃）')
     ok(threw != null && /没回包/.test(String(threw?.message ?? '')), '抛的是人话（说清是服务端没回包）', String(threw?.message).slice(0, 40))
   }
 }
+section('⑨ 传送门旁边不放方块（用户 2026-10-25 实机：会在框架上垫石头搭到门上方再挖掉）')
+{
+  const { placeBlock } = await import('../src/place.mjs')
+  const V = (x, y, z) => ({
+    x, y, z,
+    offset (dx, dy, dz) { return V(x + dx, y + dy, z + dz) },
+    floored () { return V(Math.floor(x), Math.floor(y), Math.floor(z)) },
+    plus (o) { return V(x + o.x, y + o.y, z + o.z) },
+    distanceTo (o) { return Math.hypot(x - o.x, y - o.y, z - o.z) },
+  })
+  /* 假 bot：世界表里 `end_portal` 就是门；`placeBlock` 记一次调用（拦不拦就看它有没有被调到）。 */
+  const makeSelf = (world) => {
+    const calls = []
+    const W = new Map(Object.entries(world))
+    const at = (p) => {
+      const k = `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`
+      const blk = W.get(k) ?? { name: 'air', boundingBox: 'empty' }
+      return { position: V(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)), ...blk }
+    }
+    const bot = {
+      game: { gameMode: 'survival' },
+      entity: { position: { x: 0.5, y: 20, z: 0.5, floored () { return V(0, 20, 0) } }, eyeHeight: 1.62 },
+      inventory: { items: () => [{ name: 'cobblestone', type: 1, count: 64 }] },
+      blockAt: (p) => at(p),
+      setControlState () {},
+      async equip () { calls.push('equip') },
+      async lookAt () {},
+      async placeBlock (ref, face) {
+        calls.push('place')
+        const dest = { x: ref.position.x + face.x, y: ref.position.y + face.y, z: ref.position.z + face.z }
+        W.set(`${dest.x},${dest.y},${dest.z}`, { name: 'cobblestone', boundingBox: 'block' })
+      },
+    }
+    const self = { requireBot: () => bot, walkTo: async () => {}, flyTo: async () => {}, giveItem: async () => {} }
+    return { self, calls }
+  }
+  const ctx = { t: (p) => p }
+  const GROUND = { '0,19,0': { name: 'stone', boundingBox: 'block' } }
+  // ① 目标紧邻末地门 ⇒ 直接拒，且**一次都没真去放**
+  {
+    const { self, calls } = makeSelf({ ...GROUND, '1,20,0': { name: 'end_portal', boundingBox: 'empty' }, '1,19,0': { name: 'stone', boundingBox: 'block' } })
+    const r = await placeBlock(self, { x: 0, y: 20, z: 0, name: 'cobblestone' }, ctx)
+    ok(r.placed === false && r.blockedBy === 'portal', '紧邻末地门：不放，blockedBy=portal', JSON.stringify({ placed: r.placed, blockedBy: r.blockedBy }))
+    ok(!calls.includes('place'), '🔴 一次 placeBlock 都没发（不是放失败才回滚）', `calls=${calls.join(',')}`)
+    ok(/不放方块/.test(String(r.hint ?? '')) && /mc_move/.test(String(r.hint ?? '')), '提示说清：不放方块、要进就 mc_move 走到门那格', String(r.hint ?? '').slice(0, 100))
+  }
+  // ② 下界门同理
+  {
+    const { self, calls } = makeSelf({ ...GROUND, '0,20,1': { name: 'nether_portal', boundingBox: 'empty' } })
+    const r = await placeBlock(self, { x: 0, y: 20, z: 0, name: 'cobblestone' }, ctx)
+    ok(r.placed === false && r.blockedBy === 'portal' && !calls.includes('place'), '紧邻下界门：同样拦', JSON.stringify({ placed: r.placed, blockedBy: r.blockedBy }))
+  }
+  // ③ 门在 2 格外 ⇒ 照常放（别把门旁正常建造也误伤）
+  {
+    const { self, calls } = makeSelf({ ...GROUND, '0,19,2': { name: 'stone', boundingBox: 'block' }, '0,20,2': { name: 'end_portal', boundingBox: 'empty' } })
+    const r = await placeBlock(self, { x: 1, y: 20, z: 0, name: 'cobblestone' }, ctx)
+    ok(r.placed === 'cobblestone' && calls.includes('place'), '门在 2 格外：照常放（不误伤）', JSON.stringify({ placed: r.placed }))
+  }
+  // ④ 框架方块本身**不是**门 ⇒ 不拦（`end_portal_frame` 是框，站上去放垫脚石是正常操作）
+  {
+    const { self, calls } = makeSelf({ ...GROUND, '1,20,0': { name: 'end_portal_frame', boundingBox: 'block' }, '1,19,0': { name: 'stone', boundingBox: 'block' } })
+    const r = await placeBlock(self, { x: 0, y: 20, z: 0, name: 'cobblestone' }, ctx)
+    ok(r.placed === 'cobblestone' && calls.includes('place'), '只认传送门方块名，框架不算门', JSON.stringify({ placed: r.placed }))
+  }
+}
+
 console.log(`\n${fail === 0 ? '✓ 全部通过' : '✗ 有失败'}：pass=${pass} fail=${fail}`)
 process.exit(fail === 0 ? 0 : 1)

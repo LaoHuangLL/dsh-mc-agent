@@ -80,6 +80,27 @@ rep(
 )
 
 rep(
+  '  bot.pathfinder.LOSWhenPlacingBlocks = true',
+  '  bot.pathfinder.LOSWhenPlacingBlocks = true\n'
+  + '  /* 🔴 2026-10-25 DSH：放方块前不再 sneak+back 贴到方块边缘（那是给真人防掉下去的姿态）。\n'
+  + '   *    站在当前格就能放到相邻格（约 1.4 格）。要恢复旧行为把它设成 true。 */\n'
+  + '  bot.pathfinder.sneakWhenPlacing = false',
+  '默认不蹲着贴边（sneakWhenPlacing = false）'
+)
+
+rep(
+  '    // While the bot is not in the right position rotate the view and press back while crouching\n'
+  + '    if (bot.entity.position.distanceTo(refBlock.clone().offset(edge.x + 0.5, 1, edge.z + 0.5)) > 0.4) {',
+  '    /* 🔴 2026-10-25 DSH 补丁（用户：「搭路是蹲着到方块边缘放，其实站在前一格就能直接放」）：\n'
+  + '     *    原来放方块前会 sneak + back 贴到边缘（每块多花约 1 秒，还容易把自己挤下边缘）。\n'
+  + '     *    关掉开关后直接站在当前格放：相邻格在 4.5 格可达范围内，脚下是实地就不会掉。 */\n'
+  + '    if (bot.pathfinder.sneakWhenPlacing === false) return true\n'
+  + '    // While the bot is not in the right position rotate the view and press back while crouching\n'
+  + '    if (bot.entity.position.distanceTo(refBlock.clone().offset(edge.x + 0.5, 1, edge.z + 0.5)) > 0.4) {',
+  '放方块前不再蹲着贴边（sneakWhenPlacing=false）'
+)
+
+rep(
   `      if (!placing) {
         placing = true
         placingBlock = nextPoint.toPlace.shift()

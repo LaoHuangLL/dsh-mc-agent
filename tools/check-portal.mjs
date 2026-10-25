@@ -11,6 +11,7 @@
  *   ③ 寻路报没路但人就在门边 4 格内 ⇒ 也直接迈进去（不再硬闯）；
  *   ④ 寻路黑名单里显式剔除 `*_portal`（传送门是目的地，不是危险）。
  */
+import { readFileSync } from 'node:fs'
 import { Vec3 } from 'vec3'
 import { PORTAL_RE, portalAt, inPortalNow, stepIntoPortal, goalPointFor } from '../src/movement.mjs'
 
@@ -138,6 +139,27 @@ section('⑦ stepIntoPortal：已经站在门里就不再多此一举')
   const r = await stepIntoPortal(b, { x: 0, y: -40, z: 0 }, { ms: 120 })
   ok(r.entered === true && r.already === true, 'already:true', JSON.stringify(r))
   ok(!b.controls.has('forward'), '不用按前进')
+}
+
+/* ── ⑧ 2026-10-25 实机：「还是走不进末地传送门」 ── */
+section('⑧ stepIntoPortal：往下瞄 + 没进就再跳一下 + 被打断也试 300ms')
+{
+  const src = readFileSync(new URL('../src/movement.mjs', import.meta.url), 'utf8')
+  ok(/const aimY = Math\.min\(Number\(cell\.y\) \+ 0\.5, eyeY - 0\.2\)/.test(src), '站在框架顶上时往下瞄（水平瞄只会贴着边沿蹭）')
+  ok(/const attempts = \[\{ ms: Math\.min\(ms, 700\), jump: false \}, \{ ms: 450, jump: true \}\]/.test(src), '第一段没进就再跳一下走一次')
+  ok(/if \(signal\?\.aborted === true\) await sleep\(Math\.min\(a\.ms, 300\)\)/.test(src), '🔴 预算见底（signal 已 abort）也至少走 300ms，别一动不动就报没进')
+  const m = new Map()
+  setBlock(m, 0, -40, 0, 'end_portal')
+  const b = makeBot({ blocks: m, feet: new Vec3(2.5, -39, 0.5) })   // 比门高一格（框架顶）
+  let jumps = 0
+  const origSet = b.setControlState.bind(b)
+  b.setControlState = (k, v) => { origSet(k, v); if (k === 'jump' && v === true) jumps++ }
+  let lookedAt = null
+  b.lookAt = async (v) => { lookedAt = v; setTimeout(() => { b.game.dimension = 'the_end' }, 300) }
+  const r = await stepIntoPortal(b, { x: 0, y: -40, z: 0 }, { ms: 200 })
+  ok(r.entered === true, '第二段才被传送 ⇒ 仍然报 entered:true', JSON.stringify(r))
+  ok(lookedAt && lookedAt.y < -37, '瞄点是往下（低于眼睛 -37.38）', String(lookedAt?.y))
+  ok(jumps === 1, '第二段按了一次 jump', String(jumps))
 }
 
 console.log(`\n${fail ? '❌' : '✅'} ${pass} 通过 / ${fail} 失败`)

@@ -87,6 +87,42 @@ export function traceArrow ({
  *   `yaw` / `pitch` 是 **mineflayer 内部弧度量**（`bot.look` 直接吃这个），
  *   约定和 `bot.lookAt` 一致：`yaw = atan2(-dx, -dz)`、`pitch` 正 = 往上看。
  */
+export function scanArrowCandidates ({
+  from, to, speed = ARROW_SPEED_FULL, lo = -85, hi = 85, step = 0.5,
+  gravity = ARROW_GRAVITY, drag = ARROW_DRAG, maxTicks = MAX_TICKS,
+} = {}) {
+  const dx = to.x - from.x
+  const dy = to.y - from.y
+  const dz = to.z - from.z
+  const h = Math.hypot(dx, dz)
+  if (!(h > 1e-3) || !Number.isFinite(dy)) return null
+  const ux = dx / h
+  const uz = dz / h
+  const cands = []
+  for (let deg = lo; deg <= hi + 1e-9; deg += step) {
+    const pitch = deg * DEG
+    const r = traceArrow({ from, to, ux, uz, pitch, speed, gravity, drag, maxTicks })
+    cands.push({ err: r.err, ticks: r.ticks, pitch, deg })
+  }
+  if (!cands.length) return null
+  /* 按落点误差升序 —— 第一个就是"最准的那条"（平射/高抛都可能） */
+  cands.sort((a, c) => a.err - c.err)
+  return { yaw: Math.atan2(-dx, -dz), cands }
+}
+
+/**
+ * 解出**全部**候选（按落点误差升序）。
+ *
+ * 🔴 为什么需要（用户 2026-10-25「现在弓箭只会平射，不会抛射」）：
+ *   同一段距离往往有两条解 —— 平射（低仰角）和高抛（大仰角）。
+ *   `preferLow` 一律挑平射，于是**平射路径上有方块挡着**（墙、台阶、树叶、地形起伏）时，
+ *   箭全撞在方块上，看起来就是"只会平射、不会抛射"。
+ *   把候选交出去，让调用方（`shoot.mjs`）按"这条轨迹撞不撞方块"来挑。
+ */
+export function solveArrowAll (opts = {}) {
+  return scanArrowCandidates(opts)
+}
+
 export function solveArrow ({
   from, to, speed = ARROW_SPEED_FULL, lo = -85, hi = 85, step = 0.5,
   gravity = ARROW_GRAVITY, drag = ARROW_DRAG, maxTicks = MAX_TICKS,
@@ -97,23 +133,10 @@ export function solveArrow ({
    *    而鸡的半高只有 0.35 格 ⇒ 一律擦过去。降到 0.15：平射仍优先，但精度不许赔进去。 */
   preferLow = false, lowTol = 0.15,
 } = {}) {
-  const dx = to.x - from.x
-  const dy = to.y - from.y
-  const dz = to.z - from.z
-  const h = Math.hypot(dx, dz)
-  if (!(h > 1e-3) || !Number.isFinite(dy)) return null
-  const ux = dx / h
-  const uz = dz / h
-  let best = null
-  const cands = []
-  for (let deg = lo; deg <= hi + 1e-9; deg += step) {
-    const pitch = deg * DEG
-    const r = traceArrow({ from, to, ux, uz, pitch, speed, gravity, drag, maxTicks })
-    const c = { err: r.err, ticks: r.ticks, pitch, deg }
-    cands.push(c)
-    if (!best || r.err < best.err) best = c
-  }
-  if (!best) return null
+  const scan = scanArrowCandidates({ from, to, speed, lo, hi, step, gravity, drag, maxTicks })
+  if (!scan) return null
+  const { yaw, cands } = scan
+  let best = cands[0]
   /* 平射优先：在"误差不比最优差超过 lowTol 格"的候选里，挑仰角绝对值最小的那条 */
   if (preferLow) {
     const limit = best.err + Math.max(0, Number(lowTol) || 0)
@@ -121,7 +144,7 @@ export function solveArrow ({
       if (c.err <= limit && Math.abs(c.deg) < Math.abs(best.deg)) best = c
     }
   }
-  return { yaw: Math.atan2(-dx, -dz), pitch: best.pitch, err: best.err, ticks: best.ticks, deg: best.deg }
+  return { yaw, pitch: best.pitch, err: best.err, ticks: best.ticks, deg: best.deg }
 }
 
 /**

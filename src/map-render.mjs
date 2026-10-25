@@ -202,6 +202,88 @@ export function floorMapOf (b, { radius = 32, layer = null, depth = 4 } = {}) {
  * 格坐标（行/列）↔ 真实世界坐标。`cellSize` 是**实际抽稀步长**（`glyphStep`），
  * 所以**别自己乘** —— 一律用这两个函数换算，否则改了 `glyphStep` 坐标就全错。
  */
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 竖直剖面（x / z 切片）—— 2026-10-25 用户：「map floor 加 x z all 的功能，默认还是 y」
+ *
+ * floor 原来是**水平切片**（固定 y，看 x-z 平面）。这里补另外两个方向：
+ *   axis="x" ⇒ 固定 x，横轴是 z、纵轴是 y（从 y+up 一路看到 y-down）
+ *   axis="z" ⇒ 固定 z，横轴是 x、纵轴是 y
+ * 剖面不判断"能不能站"（那是 floor 的语义），只如实报**那一格是什么** ——
+ * 挖矿/看洞顶/看有没有落石，需要的就是这个。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+export const SLICE_GLYPH = { solid: '#', air: '.', liquid: '~', lava: '≈', unknown: '?', me: '@' }
+export const SLICE_LABEL = { solid: '实心', air: '空气', liquid: '水', lava: '岩浆', unknown: '未加载', me: '我' }
+
+/** 一格在世界里是什么（剖面用）：solid / air / liquid / lava / unknown */
+export function sliceKeyOf (b, x, y, z) {
+  let blk = null
+  try { blk = b.blockAt(new Vec3(x, y, z)) } catch { return 'unknown' }
+  if (!blk) return 'unknown'
+  const nm = blk.name
+  if (isLiquid(nm)) return /lava/.test(nm) ? 'lava' : 'liquid'
+  if (isSolidBlock(nm)) return 'solid'
+  return 'air'
+}
+
+/**
+ * 竖直剖面：固定一条 x（或 z），把 y 从 `cy+up` 到 `cy-down` 逐层扫出来。
+ * @returns {{mode:'slice',axis:'x'|'z',fixed:number,radius:number,up:number,down:number,
+ *            topY:number,bottomY:number,names:string[][],self:({row:number,col:number}|null),
+ *            counts:object,truncated:boolean}}
+ */
+export function sliceMapOf (b, { axis = 'x', layer = null, radius = 32, up = 20, down = 12 } = {}) {
+  const ax = axis === 'z' ? 'z' : 'x'
+  const R = Math.min(Math.max(Number(radius) || 32, 4), 96)
+  const U = Math.min(Math.max(Number(up) || 20, 1), 64)
+  const Dn = Math.min(Math.max(Number.isFinite(Number(down)) ? Number(down) : 12, 0), 64)
+  const cx = Math.floor(b.entity.position.x)
+  const cy = Math.floor(b.entity.position.y)
+  const cz = Math.floor(b.entity.position.z)
+  const layerGiven = layer !== null && layer !== undefined && layer !== '' && Number.isFinite(Number(layer))
+  const fixed = layerGiven ? Math.floor(Number(layer)) : (ax === 'x' ? cx : cz)
+  const topY = cy + U
+  const bottomY = cy - Dn
+  const names = []
+  const counts = { solid: 0, air: 0, liquid: 0, lava: 0, unknown: 0 }
+  const t0 = Date.now()
+  let truncated = false
+  for (let y = topY; y >= bottomY; y--) {
+    if (Date.now() - t0 > 2_500) { truncated = true; break }
+    const row = []
+    for (let d = -R; d < R; d++) {
+      const x = ax === 'x' ? fixed : cx + d
+      const z = ax === 'x' ? cz + d : fixed
+      const k = sliceKeyOf(b, x, y, z)
+      row.push(k)
+      counts[k] = (counts[k] ?? 0) + 1
+    }
+    names.push(row)
+  }
+  /* 自己那一格：只有"固定的那条线"正好穿过我时才有意义 */
+  const onLine = ax === 'x' ? (fixed === cx) : (fixed === cz)
+  return {
+    mode: 'slice', axis: ax, fixed, radius: R, up: U, down: Dn,
+    center: { x: cx, y: cy, z: cz },
+    topY, bottomY, names, counts, truncated,
+    self: onLine ? { row: topY - cy, col: R } : null,
+  }
+}
+
+/** 剖面字符图：行 = y（从上到下），列 = 另一条水平轴（-R..R-1） */
+export function sliceMapText (m, { step = 1, compress = false } = {}) {
+  const st = Math.min(Math.max(Math.floor(Number(step) || 1), 1), 8)
+  const out = []
+  for (let r = 0; r < m.names.length; r += st) {
+    let line = ''
+    for (let c = 0; c < m.names[r].length; c += st) {
+      const isSelf = m.self && Math.abs(r - m.self.row) < st && Math.abs(c - m.self.col) < st
+      line += isSelf ? SLICE_GLYPH.me : (SLICE_GLYPH[m.names[r][c]] ?? '?')
+    }
+    out.push(compress ? rleGlyphs(line) : line)
+  }
+  return out.join('\n')
+}
+
 export function gridToWorld (row, col, map) {
   const size = Number(map?.cellSize) || 1
   return {

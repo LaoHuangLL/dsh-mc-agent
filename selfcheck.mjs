@@ -2023,12 +2023,15 @@ console.log('\n--- 全局配置 / mc_admin_config / MC 模式隔离 ---')
   /** 被**撤销**的 restrict（宿主契约：`restrict()` 返回 disposer；我们切出 MC 模式时必须调它） */
   const restrictReleased = []
   const guidanceCtxs = []
+  /* 扩展（extensions/*.mjs）在 ctx.effect 里**异步**注册工具 —— 等它们就位再跑 ⑤，
+   *  否则 restrict 桩会把后到的扩展工具（mc_drops 等）当成"不认识的名字"而抛错。 */
+  { let prev = -1; for (let i = 0; i < 100 && tools.size !== prev; i++) { prev = tools.size; await new Promise((r) => setTimeout(r, 20)) } }
   /**
    * 照抄宿主的 `tools.restrict()` 契约：**名字不认识就抛错**（错误里带 known global tools 清单）。
    * 🔴 这台 preset 只挂了 tool-fs（有 read/write/edit/read_image），**没有** tool-fs-search
    *    ⇒ `glob` / `grep` 不在场 —— 正是这个"在场名单"逼出了 index.js 里那次过滤重试。
    */
-  const KNOWN_TOOLS = new Set([
+  const STATIC_TOOLS = [
     ...tools.keys(),
     'read', 'write', 'edit', 'read_image',
     'present',
@@ -2037,7 +2040,11 @@ console.log('\n--- 全局配置 / mc_admin_config / MC 模式隔离 ---')
     /* 🔴 用户 2026-10-19：配套插件（billion-context）的 ACP 族要在场 —— MC 模式的
      *    白名单默认放行它们，这里把它们算进"这台宿主认识的名字"，才能断言真的放行了。 */
     'compress', 'decompress', 'search_context', 'acp_status', 'acp_cache', 'acp_read_original_image',
-  ])
+  ]
+  /** 扩展（extensions/*.mjs）是 `ctx.effect` 里异步注册的 —— 用函数**现场取**快照，
+   *  否则这里构造 Set 的那一刻扩展工具（mc_drops 之类）还没进 tools，restrict 桩会误报
+   *  "names unknown global tool"（真宿主不会，它的 restrict 只看自己注册表）。 */
+  const KNOWN_TOOLS = () => new Set([...tools.keys(), ...STATIC_TOOLS])
   const makeAgentCtx = (preset) => {
     const base = {}
     presetByCtx.set(base, preset)
@@ -2045,10 +2052,10 @@ console.log('\n--- 全局配置 / mc_admin_config / MC 模式隔离 ---')
       ? {
           restrict: (f) => {
             const names = [...(f.allow ?? []), ...(f.deny ?? [])]
-            const unknown = names.filter((n) => !KNOWN_TOOLS.has(n))
+            const unknown = names.filter((n) => !KNOWN_TOOLS().has(n))
             if (unknown.length) {
               throw new Error(`tools.restrict() names unknown global tool${unknown.length > 1 ? 's' : ''} `
-                + `${unknown.map((n) => `"${n}"`).join(', ')}; known global tools: ${[...KNOWN_TOOLS].sort().join(', ')}`)
+                + `${unknown.map((n) => `"${n}"`).join(', ')}; known global tools: ${[...KNOWN_TOOLS()].sort().join(', ')}`)
             }
             const call = { preset, f }
             restrictCalls.push(call)
