@@ -64,8 +64,15 @@ export async function apply(api) {
 import { clamp, blockIdOf, countOf, findPlaceSpot } from './mc_util.mjs'
 ```
 
-依赖方向：`mc_craft` / `mc_chest` / `mc_furnace` / `mc_observe` / `mc_auto` → **`mc_util`** → `mc_view-render`。
+依赖方向：`mc_craft` / `mc_chest` / `mc_furnace` / `mc_observe` / `mc_auto` → **`mc_util`** → **`mc_view-render`**。
 （`mc_craft.mjs` 仍然把其中几个再导出一次，只是为了不改老的 import 路径。）
+
+直播相关的两个模块：`mc_stream.mjs`（HTTP 叠加层 + `mc_stream` 工具）→ **`mc_stream-render.mjs`**
+（取景 + `renderView` + PNG 编码）。`mc_stream-render.mjs` 和 `mc_util.mjs` 一样**没有 `apply`**，
+加载器会安静跳过它。
+
+出口闸：`mc_stream` 上屏前走 **`mc_text-filter.mjs`**（网址/联系方式/长数字/广告词 → 遮成 ＊，
+词表在 `<记忆根>/filter.json`）。它也没有 `apply`，只被 import。
 
 ## 模板
 
